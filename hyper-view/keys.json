@@ -1,0 +1,35 @@
+{
+  "layout:hyper-view": {
+    "ctrl-k": "hyper-view.palette",
+    "f1": "hyper-view.palette",
+    "ctrl-j": "hyper-view.waiting",
+    "alt-1": "hyper-view.tab-1",
+    "alt-2": "hyper-view.tab-2",
+    "alt-3": "hyper-view.tab-3",
+    "alt-4": "hyper-view.tab-4",
+    "alt-5": "hyper-view.tab-5",
+    "alt-6": "hyper-view.tab-6",
+    "ctrl-shift-up": "hyper-view.project-prev",
+    "ctrl-shift-down": "hyper-view.project-next",
+    "ctrl-shift-d": "hyper-view.dashboard",
+    "ctrl-shift-m": "hyper-view.mailbox",
+    "ctrl-shift-a": "hyper-view.tokens",
+    "ctrl-shift-e": "hyper-view.focus-sidebar",
+    "ctrl-f": "hyper-view.find",
+    "ctrl-/": "hyper-view.shortcuts",
+    "f6": "hyper-view.zone-next",
+    "shift-f6": "hyper-view.zone-prev",
+    "ctrl-tab": "hyper-view.tab-next",
+    "ctrl-shift-tab": "hyper-view.tab-prev",
+    "ctrl-shift-h": "hyper-view.explorer-machines",
+    "ctrl-shift-g": "hyper-view.explorer-agents",
+    "ctrl-shift-b": "hyper-view.toggle-sidebar",
+    "ctrl-`": "hyper-view.toggle-terminals"
+  },
+  "terminal": {
+    "ctrl-k": "terminal",
+    "ctrl-j": "terminal",
+    "ctrl-f": "terminal",
+    "ctrl-/": "terminal"
+  }
+}

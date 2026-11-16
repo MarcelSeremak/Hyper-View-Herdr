@@ -1,0 +1,10 @@
+# generated at runtime by the mod
+mods/hyper-view/.gen/
+.hv-dev/
+*.error
+*.d.ts
+jsconfig.json
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/

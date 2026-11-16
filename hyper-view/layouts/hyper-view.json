@@ -1,0 +1,220 @@
+{
+  "id": "root",
+  "type": "column",
+  "children": [
+    {
+      "id": "mp-top",
+      "type": "row",
+      "children": [
+        {
+          "id": "mp-sidebar-col",
+          "type": "column",
+          "children": [
+            {
+              "id": "mp-lights",
+              "type": "block",
+              "content": {
+                "mod": "hyper-view",
+                "props": {
+                  "role": "lights"
+                }
+              },
+              "size": {
+                "px": 40
+              },
+              "window_drag": true
+            },
+            {
+              "id": "mp-sidebar",
+              "type": "block",
+              "content": {
+                "mod": "hyper-view",
+                "props": {
+                  "role": "sidebar"
+                }
+              }
+            }
+          ],
+          "size": {
+            "px": 268
+          },
+          "min": 48,
+          "max": 440,
+          "background": "chrome"
+        },
+        {
+          "id": "mp-body",
+          "type": "row",
+          "children": [
+            {
+              "id": "mp-main-col",
+              "type": "column",
+              "children": [
+                {
+                  "id": "mp-header",
+                  "type": "block",
+                  "content": {
+                    "mod": "hyper-view",
+                    "props": {
+                      "role": "header"
+                    }
+                  },
+                  "size": {
+                    "px": 40
+                  },
+                  "window_drag": true
+                },
+                {
+                  "id": "mp-center",
+                  "type": "stack",
+                  "children": [
+                    {
+                      "id": "mp-view",
+                      "type": "block",
+                      "content": {
+                        "mod": "hyper-view",
+                        "props": {
+                          "role": "view"
+                        }
+                      }
+                    },
+                    {
+                      "id": "mp-terms",
+                      "type": "column",
+                      "children": [
+                        {
+                          "id": "mp-tabs",
+                          "type": "block",
+                          "content": {
+                            "mod": "hyper-view",
+                            "props": {
+                              "role": "tabs"
+                            }
+                          },
+                          "size": {
+                            "px": 38
+                          }
+                        },
+                        {
+                          "id": "mp-main",
+                          "type": "block",
+                          "content": {
+                            "tab": "active",
+                            "pane": {
+                              "header": {
+                                "content": {
+                                  "mod": "pane"
+                                },
+                                "reveal": "always",
+                                "height": 28,
+                                "position": "top"
+                              },
+                              "background": "background",
+                              "border": {
+                                "width": 1,
+                                "color": "border"
+                              },
+                              "focus": {
+                                "width": 1,
+                                "color": "accent"
+                              },
+                              "radius": 10,
+                              "gap": 8,
+                              "lone": true
+                            }
+                          }
+                        }
+                      ],
+                      "padding": [
+                        0,
+                        10
+                      ]
+                    },
+                    {
+                      "id": "mp-vmterm",
+                      "type": "column",
+                      "children": [],
+                      "padding": [
+                        12,
+                        24
+                      ],
+                      "gap": 8
+                    }
+                  ],
+                  "active": "mp-view"
+                }
+              ],
+              "min": 0
+            },
+            {
+              "id": "mp-chat-col",
+              "type": "column",
+              "children": [
+                {
+                  "id": "mp-chat",
+                  "type": "block",
+                  "content": {
+                    "mod": "hyper-view",
+                    "props": {
+                      "role": "chat"
+                    }
+                  }
+                }
+              ],
+              "size": {
+                "px": 380
+              },
+              "min": 0,
+              "max": 4000,
+              "padding": [
+                10,
+                10
+              ]
+            }
+          ],
+          "padding": [
+            0,
+            0
+          ],
+          "gap": 10
+        }
+      ],
+      "divider": {
+        "width": 1,
+        "color": "border"
+      }
+    },
+    {
+      "id": "mp-status",
+      "type": "block",
+      "content": {
+        "mod": "hyper-view",
+        "props": {
+          "role": "status",
+          "gen": 2
+        }
+      },
+      "size": {
+        "px": 24
+      },
+      "resizable": false
+    }
+  ],
+  "background": "canvas",
+  "theme": {
+    "light": "hyper-view-light",
+    "dark": "hyper-view-dark"
+  },
+  "font": "JetBrains Mono",
+  "font_size": 13,
+  "ui_font": "JetBrains Mono",
+  "terminal_padding": [
+    12,
+    10
+  ],
+  "titlebar": "none",
+  "traffic_lights": [
+    14,
+    18
+  ]
+}
