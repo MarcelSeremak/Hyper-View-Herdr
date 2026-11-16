@@ -39,7 +39,7 @@ Projects, agents, tasks, machines, secrets and a shared team chat live in one ID
 ## Install
 
 ```powershell
-git clone https://github.com/<you>/hyper-view.git
+git clone https://github.com/MarcelSeremak/hyper-view.git
 cd hyper-view
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
