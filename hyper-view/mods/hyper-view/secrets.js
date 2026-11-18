@@ -2,7 +2,7 @@
 import { cardHead as cardHeader, colHead, emptyLine, relTime, relShort, trackHover, hovered } from "./ide.js";
 import { T } from "./tokens.js";
 import { div } from "gpui-kit";
-import { h_flex, v_flex } from "gpui-base";
+import { h_flex, v_flex, Input } from "gpui-base";
 import { run, shared, setShared } from "herdr";
 import {
   iconEl, button, card, empty, ago, tile, herdrHome, hpCmd, hp, toast, pill, iconButton, BAD, WARN,
@@ -22,7 +22,8 @@ function expiryEl(t, s) {
 }
 
 export function secretsView(ws, t) {
-  const list = ws.secrets.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const all = ws.secrets.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const q = ws.secQ ?? "";
   const lastUse = {}, count = {};
   for (const u of ws.uses) { lastUse[u.secret] = u; count[u.secret] = (count[u.secret] ?? 0) + 1; }
   const projName = (slug) => {
@@ -61,9 +62,20 @@ export function secretsView(ws, t) {
           : iconButton(t, rm, "x", (_e, cx) => { ws.confirm = rm; cx.notify(); cx.timer.after(3000, (cx) => { if (ws.confirm === rm) { ws.confirm = null; cx.notify(); } }); }, "Revoke"))));
   };
 
+  // Search: name, type, host, user, shared projects, description.
+  const hay = (s) => [s.name, typeLabel(s), s.host, s.url, s.user, s.desc, ...(s.projects ?? []).map(projName)].filter(Boolean).join(" ").toLowerCase();
+  const list = q ? all.filter((s) => q.split(/\s+/).every((w) => hay(s).includes(w))) : all;
+  const search = h_flex().id("mp-sec-q").w(320).h(T.h.btnSm).px(8).gap(6).items_center().rounded(T.r.ctrl).bg(t.raised).border_1().border_color(q ? t.accent : t.border)
+    .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+    .child(iconEl("search", t.dim, 13))
+    .child(Input.new(ws.secSearchState()).flex_1().h(24).text_size(T.text.sm).text_color(t.foreground))
+    .when(Boolean(q), (el) => el.child(iconButton(t, "mp-sec-q-x", "x", (_e, cx) => { ws.secSearch.set_value(""); ws.secQ = ""; cx.notify(); }, "Clear", { size: 20 })));
   return v_flex().gap(16)
+    .when(all.length > 0, (el) => el.child(h_flex().gap(T.sp.md).items_center().child(search)
+      .when(Boolean(q), (e) => e.child(div().text_size(T.text.xs).text_color(t.dim).child(`${list.length} of ${all.length}`)))))
     .child(card(t, "mp-sec-list").overflow_hidden()
-      .when(list.length === 0, (el) => el.child(emptyLine(t, "mp-sec-empty", "No secrets yet.", ["Add a secret", () => openForm("secret-add")])))
+      .when(all.length === 0, (el) => el.child(emptyLine(t, "mp-sec-empty", "No secrets yet.", ["Add a secret", () => openForm("secret-add")])))
+      .when(all.length > 0 && list.length === 0, (el) => el.child(emptyLine(t, "mp-sec-none", "No matches.")))
       .when(list.length > 0, (el) => el.child(colHead(t, COLS, { pl: 12, pr: 12 })))
       // Keyboard (workspace.js navMark): Enter edits, → actions (share, copy name, remove).
       .children(list.map((s, i) => ws.navMark(i === 0 ? row(s).border_t_0() : row(s), { key: `sec:${s.name}`, open: () => openForm("secret-add", { edit: s }), ref: { kind: "secret", name: s.name } }))));

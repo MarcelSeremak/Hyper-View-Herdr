@@ -439,7 +439,6 @@ export class EditorBar {
         .text_size(T.text.xs).text_color(t.muted).bg(t.raised).border_1().border_color(t.border).tooltip("First start: downloading the editor plugins (about 30 s). The editor continues by itself.")
         .child(svg(icon("loader")).size(T.icon.sm).text_color(t.accent).loop("opacity", { from: 0.35, to: 1, period: 1000 }))
         .child("Setting up editor plugins…")))
-      .when(this.rg === false, (el) => el.child(btn("mp-ed-rg", "plus", "ripgrep", () => installRipgrep(vm), { tip: "Install ripgrep (winget) for fast Ctrl+P and project search" })))
       .child(btn("mp-ed-files", "sidebar", "Files", () => editorAction(vm, "HvAction('tree')"), { tip: "Toggle the file tree (Ctrl+B) · Ctrl+P finds a file" }))
       .child(btn("mp-ed-search", "search", "Search", () => editorAction(vm, "HvAction('grep')"), { tip: "Search in all files (Ctrl+Alt+F) · Ctrl+F finds in the file" }))
       .child(btn("mp-ed-cmds", "list", "Commands", () => editorAction(vm, "HvAction('commands')"), { tip: "All editor commands: git, code, replace, go to line… (Ctrl+Alt+P)" }))
@@ -448,4 +447,51 @@ export class EditorBar {
     if (this.sel >= items.length) this.sel = items.length - 1;
     return row;
   }
+}
+
+// Leaving a machine's Editor tab closes its Neovim (and the SSH shell under it), so editors don't pile
+// up in memory, one per machine ever opened. Unsaved files keep it open (with a note); reopening the
+// tab starts a fresh editor in the same folder (g:hv_state remembers it).
+export async function closeEditor(vm) {
+  const c = ctxFor(vm);
+  const ed = await liveTerm(c.name);
+  if (ed) {
+    const tools = await findTools();
+    if (tools.nvim) {
+      const r = await exec(tools.nvim, ["--server", c.pipe, "--remote-expr", "len(getbufinfo({'bufmodified':1}))"], { timeout: 5000 }).catch(() => null);
+      const dirty = parseInt(String(r?.stdout ?? "0").trim(), 10) || 0;
+      if (dirty > 0) {
+        toast(`Editor on ${vm} stays open`, `${dirty} unsaved file${dirty === 1 ? "" : "s"}. Save (Ctrl+S) and leave the tab again to close it.`, "info");
+        return false;
+      }
+    }
+    run("terminal.kill", { terminal: ed.address });
+  }
+  const sh = await liveTerm(c.shell);
+  if (sh) run("terminal.kill", { terminal: sh.address });
+  await hc(["rm", c.name]).catch(() => {});
+  await hc(["rm", c.shell]).catch(() => {});
+  return true;
+}
+
+// Editors left running from before (one per machine ever opened): closed at start, except the one whose
+// Editor tab is shown and any with unsaved files.
+export async function closeStaleEditors(keepVm) {
+  const keep = keepVm ? ctxFor(keepVm).name : null;
+  const list = parseJson((await hc(["ls", "--all", "--json"]).catch(() => ({ stdout: "" }))).stdout)?.terminals ?? [];
+  const tools = await findTools();
+  let n = 0;
+  for (const t of list) {
+    if (!t.name || !/^edd?-/.test(t.name) || t.state !== "live" || t.name === keep) continue;
+    const s = t.name.replace(/^edd?-/, "");
+    const pipe = `\\\\.\\pipe\\hv-nvim-${t.name.startsWith("edd-") ? "demo-" : ""}${s}`;
+    if (tools.nvim) {
+      const r = await exec(tools.nvim, ["--server", pipe, "--remote-expr", "len(getbufinfo({'bufmodified':1}))"], { timeout: 5000 }).catch(() => null);
+      if ((parseInt(String(r?.stdout ?? "0").trim(), 10) || 0) > 0) continue;
+    }
+    run("terminal.kill", { terminal: t.address });
+    await hc(["rm", t.address]).catch(() => {});
+    n++;
+  }
+  return n;
 }

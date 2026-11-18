@@ -20,6 +20,9 @@ import { relTime, kbd } from "./ide.js";
 
 // Quick answers to a question addressed to you (buttons + keys while the message list has the keyboard,
 // Mailbox-style): [key, label, color (null = muted), text sent].
+// A question to Marcel = a question mark or "Odpowiedz ..." (AGENTS.md tells agents so); anything else is an
+// FYI that stays in the chat. Keyword guessing ("zgoda", "potwierdź") caught plain status messages.
+const ASK = /\?|\bodpowiedz\b|\breply\b/i;
 const QUICK = [["a", "Approve", OK, "Approved. Go ahead."], ["r", "Reject", BAD, "Rejected. Do not do it; tell me the alternative."], ["w", "Wait", null, "Wait. I will get back to you."]];
 // Focus handle of the message list (kept outside the instance: Herdr's in-place reload keeps instance fields only).
 const KCM = new WeakMap();
@@ -87,7 +90,7 @@ export class Chat {
     this.tpSeenAt = shared("mp.taskPanel")?.at;
     this.otSeen = shared("mp.openTask")?.at;
     try { KC(this).fh = cx.focus_handle(); } catch {}
-    watchData(cx, (cx) => this.reload(cx), 3000, "chat");
+    watchData(cx, (cx) => this.reload(cx), 15000, "chat"); // folder watch reloads at once; timer = fallback
     cx.spawn(async () => this.ensureRoom());
   }
 
@@ -182,6 +185,38 @@ export class Chat {
     cx.spawn(async () => { await this.ensureRoom(); run("layout.resize", { id: RIGHT.id, px: to }); });
   }
 
+  // Mailbox: the chat takes the right half of the main area (questions on the left); elsewhere its usual width.
+  syncMailbox(cx) {
+    if (this.sliding || isCollapsed(RIGHT) || this.fullOn) return;
+    const mb = view().kind === "mailbox";
+    const want = mb ? Math.max(RIGHT.open, Math.round(this.fullPx() / 2)) : RIGHT.open;
+    // Compared with the real width: after collapse + expand the column comes back at its normal width.
+    const now = this.curPx();
+    if (mb === this.mbWide && (!mb || Math.abs(want - (now ?? 0)) <= 8)) return;
+    const was = this.mbWide;
+    this.mbWide = mb;
+    if (!mb && !was) return;
+    this.px = want;
+    cx.spawn(async () => { await this.ensureRoom(); run("layout.resize", { id: RIGHT.id, px: want }); });
+  }
+  // Which conversation (outside a project view): any project or loose agent; the choice is shared "mp.project".
+  switcher(t) {
+    const all = this.allList ?? [];
+    const cur = this.project?.slug;
+    const row = (x) => h_flex().id(`mp-chat-sw-${x.slug}`).h(T.h.row).px(T.sp.sm).gap(T.sp.md).items_center().rounded(T.r.ctrl).cursor_pointer()
+      .bg(x.slug === cur ? t.selected : clear).hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { this.switching = false; setShared("mp.project", x.slug); cx.notify(); })
+      .child(x.loose ? agentAvatar(t, x.agents?.[0]?.name ?? x.name, liveAgent(x, x.agents?.[0]?.name), 18) : tile(x.name, { kind: "project", size: 18, color: x.color, radius: 4 }))
+      .child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).text_color(t.foreground).child(x.loose ? x.agents?.[0]?.name ?? x.name : x.name))
+      .child(div().flex_none().text_size(T.text.xs).text_color(t.dim).child(x.loose ? "agent" : `${(x.agents ?? []).length} agents`));
+    const sec = (title) => div().px(T.sp.sm).pt(T.sp.md).pb(T.sp.xs).text_size(T.text.xs).font_medium().text_color(t.muted).child(title);
+    const projs = all.filter((x) => !x.loose), loose = all.filter((x) => x.loose);
+    return v_flex().w_full().px(T.sp.md).pt(T.sp.sm).gap(T.sp.xxs)
+      .when(projs.length > 0, (el) => el.child(sec("Projects")).children(projs.map(row)))
+      .when(loose.length > 0, (el) => el.child(sec("Agents")).children(loose.map(row)))
+      .when(!all.length, (el) => el.child(div().px(T.sp.sm).text_size(T.text.sm).text_color(t.dim).child("No projects yet.")));
+  }
+
   // Conversation filter: click an agent's name/avatar in a message (or a rail avatar); a removable
   // pill in the header shows it. Messages go to the team unless @one-agent or a reply.
   // The tutorial can pick a chat filter (shared "mp.chatPick" = { name, at }).
@@ -197,7 +232,9 @@ export class Chat {
   reload(cx) {
     return cx.spawn(async (cx) => {
       const slug = currentSlug();
-      if (!slug) this.pickList = (await listProjects().catch(() => [])).filter((x) => !x.loose);
+      // Every project and loose agent: the switcher (header) outside project views, and the empty-state list.
+      this.allList = await listProjects().catch(() => []);
+      if (!slug) this.pickList = this.allList.filter((x) => !x.loose);
       const project = slug ? await loadProject(slug) : null;
       const events = await loadEvents(slug);
       const switched = project?.slug !== this.project?.slug;
@@ -420,7 +457,10 @@ export class Chat {
     const direct = e.to && e.to !== "all";
     const live = mine ? null : liveAgent(p, e.from);
     const hovered = this.hoverMsg === i;
-    const askedMe = !mine && e.to === "ty";
+    // Approve / Reject / Wait only under a question to you (same test as the Mailbox "Questions"); reports and
+    // status messages to you are just read (hover: reply).
+    // No Approve / Reject / Wait buttons in the chat: real approvals are in the Mailbox; questions get a reply.
+    const askedMe = false && !mine && e.to === "ty" && ASK.test(String(e.text ?? ""));
     const listKb = Boolean(KC(this).fh?.is_focused?.());
     const kbSel = listKb && this.selMsg === i && this.hoverMsg == null;
     // Key hints (A R W) while the row is hovered or keyboard-selected.
@@ -568,6 +608,7 @@ export class Chat {
     // Hidden column (or sliding away / in): an empty panel; the mode decides (toolbar.js setChat).
     if (chatHidden()) return div().id("mp-chat").size_full().bg(t.surface).rounded(T.r.dialog).border_1().border_color(t.border);
     this.syncFull(cx);
+    this.syncMailbox(cx);
     if (isCollapsed(RIGHT)) return this.rail(t);
     if (tp?.slug) return taskPanel(this, t, tp);
     const full = Boolean(this.fullOn);
@@ -595,14 +636,21 @@ export class Chat {
         .child(iconButton(t, "mp-chat-collapse", "chevron-right", (_e, cx) => this.collapse(cx), "Collapse panel"))
         .child(iconButton(t, "mp-chat-full", full ? "minimize" : "maximize", (_e, cx) => this.toggleFull(cx), full ? "Restore width" : "Expand to full width", { color: full ? t.accent : undefined }))
         .child(div().text_size(T.text.sm).font_semibold().child("Chat"))
-        .when(Boolean(p), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).text_color(t.dim).child(`· ${p.loose ? p.agents[0]?.name ?? p.name : p.name}`)))
+        // Outside a project view the conversation can be switched (any project or loose agent).
+        .when(view().kind !== "project", (el) => el.child(h_flex().id("mp-chat-switch").flex_1().min_w(0).gap(4).items_center().cursor_pointer()
+          .tooltip("Switch conversation").on_click((_e, cx) => { this.switching = !this.switching; cx.notify(); })
+          .child(div().min_w(0).truncate().text_size(T.text.sm).text_color(this.switching ? t.accent : t.dim)
+            .child(p ? `· ${p.loose ? p.agents[0]?.name ?? p.name : p.name}` : "· pick a conversation"))
+          .child(iconEl(this.switching ? "chevron-up" : "chevron-down", this.switching ? t.accent : t.dim, 12))))
+        .when(view().kind === "project" && Boolean(p), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).text_color(t.dim).child(`· ${p.loose ? p.agents[0]?.name ?? p.name : p.name}`)))
         .when(Boolean(p) && Boolean(fLabel), (el) => el.child(pill())))
       .child(scrollY("mp-chat-scroll", v_flex().id("mp-chat-list").flex_1().min_h(0).track_scroll(this.scroll).pb(12).when(full, (el) => el.items_center())
         .when(Boolean(KC(this).fh), (el) => el.track_focus(KC(this).fh)).key_context("HvChatList").on_key_down((e, cx) => this.listKey(e, cx))
         .when(list.length === 0 && Boolean(p), (el) => el.child(div().w_full().px(T.pad.card).py(T.pad.card).text_size(T.text.sm).text_color(t.dim).whitespace_normal()
           .child("No messages yet. Write below to brief the team, or @name to ask one agent.")))
-        .when(!p, (el) => el.child(this.picker(t)))
-        .children(list.map((e, i) => read(this.item(t, e, i, list[i - 1]))))))
+        .when(!p && view().kind === "project", (el) => el.child(this.picker(t)))
+        .when((this.switching || !p) && view().kind !== "project", (el) => el.child(this.switcher(t)))
+        .when(!(this.switching && view().kind !== "project"), (el) => el.children(list.map((e, i) => read(this.item(t, e, i, list[i - 1])))))))
       .when(Boolean(p), (el) => el.child(h_flex().flex_none().px(12).pb(12).pt(12).justify_center().border_t_1().border_color(t.border).child(read(v_flex().flex_1().min_w(0).gap(8))
         .when(Boolean(this.replyTo), (el) => el.child(h_flex().h(28).pl(8).pr(4).gap(8).items_center().border_l_2().border_color(t.accent)
           .child(div().flex_1().min_w(0).truncate().text_size(T.text.xs).text_color(t.muted).child(`Replying to ${this.replyTo.from}: ${this.replyTo.text}`))

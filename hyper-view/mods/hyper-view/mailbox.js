@@ -18,7 +18,7 @@ import { openTaskPanel } from "./taskpanel.js";
 import { relTime, hoverAction, trackHover, hovered, emptyLine, skeleton, kbd } from "./ide.js";
 
 const file = () => `${herdrHome()}/mailbox.json`;
-const ASK = /\?\s*$|\?\s|approv|permission|confirm|ok to|okay to|may i|can i|should i|go ahead|sign.?off/i;
+export const ASK = /\?|\bodpowiedz\b|\breply\b/i;
 const REPORT = /^daily-/;
 const now = () => Date.now();
 const live = (snooze) => Object.fromEntries(Object.entries(snooze ?? {}).filter(([, u]) => new Date(u).getTime() > now()));
@@ -102,13 +102,23 @@ export async function loadMailbox() {
       }
       // Already answered: you wrote to that agent afterwards.
       const answered = events.slice(i + 1).some((x) => x.from === "ty" && x.to === e.from);
-      items.push({ id: `${slug}:${e.id ?? e.ts}`, slug, proj, kind: ASK.test(e.text ?? "") ? "ask" : "msg", from: e.from, text: e.text ?? "", ts: e.ts, task: e.task, auto: answered });
+      // Plain messages (reports, "done", "noted") stay in the chat; only questions come to the Mailbox.
+      if (!ASK.test(e.text ?? "")) return;
+      items.push({ id: `${slug}:${e.id ?? e.ts}`, slug, proj, kind: "ask", from: e.from, text: e.text ?? "", ts: e.ts, task: e.task, auto: answered });
     });
+    // Tasks: only blocked ones that wait for Marcel. Not: Review (another agent reviews it), blocked on another
+    // task ("waiting for #N", hp's dependency text), or blocked on a question / approval already in the list.
+    const asked = new Set(items.filter((it) => it.slug === slug && (it.kind === "ask" || it.kind === "approval") && it.task != null).map((it) => String(it.task)));
     for (const x of proj.tasks) {
-      if (x.status !== "blocked" && x.status !== "review") continue;
+      if (x.status !== "blocked") continue;
+      if (/^\s*waiting for #\d+/i.test(x.blocked_reason ?? "")) continue;
+      if (asked.has(String(x.id))) continue;
       const last = x.history?.length ? x.history[x.history.length - 1].ts : x.started ?? x.created;
-      items.push({ id: `${slug}:task:${x.id}:${x.status}`, slug, proj, kind: "task", from: x.agent ?? "?", taskId: x.id, status: x.status,
-        text: `#${x.id} ${x.title}${x.status === "blocked" && x.blocked_reason ? " — " + x.blocked_reason : ""}`, ts: last, auto: false });
+      // Answered: you wrote to its agent about this task after it got blocked (the agent unblocks it).
+      const answered = x.status === "blocked" && events.some((e) => e.from === "ty" && e.to === x.agent && String(e.task ?? "") === String(x.id) && String(e.ts) > String(last));
+      items.push({ id: `${slug}:task:${x.id}:${x.status}`, slug, proj, kind: "task", from: x.agent ?? "?", taskId: x.id, task: x.id, status: x.status,
+        title: x.title, reason: x.blocked_reason ?? "",
+        text: `#${x.id} ${x.title}${x.status === "blocked" && x.blocked_reason ? " — " + x.blocked_reason : ""}`, ts: last, auto: answered });
     }
   }
   if (demo()) items.push(...demoExtras(projs));
@@ -129,17 +139,18 @@ const snoozedUntil = (it) => { const u = S.snooze[it.id]; return u && new Date(u
 const isOpen = (it) => !isDone(it) && !snoozedUntil(it);
 const countOpen = () => S.items.filter(isOpen).length;
 // Importance order (Linear groups / Superhuman split inbox): what blocks an agent first, FYI last.
-const GROUPS = [
-  ["approval", "Approvals", WARN], ["ask", "Questions", WARN], ["blocked", "Blocked", BAD],
-  ["review", "Review", INFO], ["msg", "Messages", null], ["report", "Reports", null],
-];
-const groupOf = (it) => (it.kind === "task" ? it.status : it.kind);
+// One list: everything that waits for you is an "Approval" (approval requests, questions, blocked and review
+// tasks, reports), newest first; each row keeps its own buttons (Approve / Reject, Reply, Answer).
+const GROUPS = [["all", "Approvals", WARN]];
+const groupOf = () => "all";
 
+// S.loading = start time: a load whose task was dropped (the view rebuilt mid-load) no longer blocks the
+// next one for ever (the Mailbox used to stay on its skeleton until a restart).
 function refresh(cx) {
-  S.loading = true;
+  S.loading = now();
   cx.spawn(async (cx) => {
     try { const r = await loadMailbox(); S.items = r.items; S.done = r.doneIds; S.snooze = r.snooze; publishCount(r.open); } catch {}
-    S.at = now(); S.loading = false;
+    S.at = now(); S.loading = 0;
     cx.notify();
   });
 }
@@ -195,7 +206,8 @@ function say(cx, it, text) {
   else cx.spawn(async () => {
     const p = it.proj;
     const to = p.loose ? p.agents[0]?.name ?? it.from : it.from;
-    const r = await hp(["say", text], { p: it.slug, as: "ty", to, task: it.task ? String(it.task) : undefined });
+    const r = await hp(["say", it.kind === "task" ? `Answer for blocked #${it.taskId}: ${text}` : text], { p: it.slug, as: "ty", to, task: it.task ? String(it.task) : undefined });
+    if (r.ok) toast(`Sent to ${to}`, it.kind === "task" ? `#${it.taskId}: it continues when it reads it.` : "", "success");
     if (r.ok && p.loose && p.agents[0] && !liveAgent(p, p.agents[0].name)) startAgent(p, p.agents[0], text);
     if (!r.ok) toast("Message not sent", r.err, "error");
   });
@@ -214,24 +226,27 @@ function decide(cx, it, verb, note) {
   setDone(cx, it, true);
 }
 // A / X: approve or reject an approval request, or answer a question with a yes / no.
-const canDecide = (it) => isOpen(it) && ((it.kind === "approval" && it.approvalId) || it.kind === "ask");
+// Approve / Reject only for real approval requests (hp ask: one command, once); questions are answered with Reply.
+const canDecide = (it) => isOpen(it) && it.kind === "approval" && it.approvalId;
 function approve(cx, it) { if (!canDecide(it)) return; if (it.kind === "approval") decide(cx, it, "approve"); else say(cx, it, "Approved. Go ahead."); }
 function reject(cx, it) {
   if (!canDecide(it)) return;
   if (it.epicPlan) { reply(it); S.reviseId = it.id; return; } // Revise: type what to change, Enter sends it
   if (it.kind === "approval") decide(cx, it, "reject"); else say(cx, it, "Rejected. Do not do it; tell me the alternative.");
 }
-const canReply = (it) => !isDone(it) && it.kind !== "task" && it.kind !== "report";
+// Blocked tasks are answered like questions: the reply goes to its agent with the task number (it unblocks it).
+const canReply = (it) => !isDone(it) && it.kind !== "report" && (it.kind !== "task" || it.status === "blocked");
 function reply(it) {
   if (!canReply(it)) return;
   S.reviseId = null;
   S.replyId = it.id; S.snoozeId = null;
   const inp = replyInput(); inp.set_value(""); inp.focus();
 }
+function openTaskOf(it) { selectProject(it.slug, "tasks"); openTaskPanel(it.slug, it.taskId); showCenter("mp-view"); }
 function openItem(it) {
-  if (it.kind === "task") { selectProject(it.slug, "tasks"); openTaskPanel(it.slug, it.taskId); showCenter("mp-view"); }
-  else if (it.kind === "report" || it.epicPlan) S.openId = S.openId === it.id ? null : it.id;
-  else reply(it);
+  if (it.kind === "task" && it.status !== "blocked") openTaskOf(it);
+  // Everything else opens in place: the full text (an epic plan as its list of tasks, an approval with its command).
+  else S.openId = S.openId === it.id ? null : it.id;
 }
 function replyInput() {
   if (!S.input) {
@@ -264,9 +279,12 @@ function row(t, it, key) {
   if (canDecide(it)) actions
     .child(small(t, `${k}-ok`, "Approve", OK, (cx) => approve(cx, it), hot ? "A" : null))
     .child(small(t, `${k}-no`, it.epicPlan ? "Revise" : "Reject", it.epicPlan ? WARN : BAD, (cx) => reject(cx, it), hot ? "X" : null));
-  // Secondary actions appear on hover, with their key (Linear inbox / Raycast action hints).
-  if (hot && canReply(it)) actions.child(hoverAction(t, `${k}-re`, "Reply", () => { if (S.replyId === it.id) S.replyId = null; else reply(it); }, "R"));
-  if (hot && (it.kind === "task" || it.kind === "report" || it.epicPlan)) actions.child(hoverAction(t, `${k}-open`, S.openId === it.id ? "Close" : "Open", () => openItem(it), "↵"));
+  // Questions, messages and blocked tasks: always an answer button (the agent continues when you answer).
+  // Everything open can be answered in words too: approvals and questions get Reply next to Approve / Reject
+  // (e.g. "yes, but only on TEST"; a plain Approve / Reject still decides the approval itself).
+  if (canReply(it)) actions.child(small(t, `${k}-re`, it.kind === "task" ? "Answer" : "Reply", INFO, () => { if (S.replyId === it.id) S.replyId = null; else reply(it); }, hot ? "R" : null));
+  if (hot && it.kind === "task") actions.child(hoverAction(t, `${k}-task`, "Task", () => openTaskOf(it), null));
+  if (hot && it.kind !== "task") actions.child(hoverAction(t, `${k}-open`, S.openId === it.id ? "Close" : "Read", () => openItem(it), "↵"));
   if (hot && !done) actions.child(hoverAction(t, `${k}-sz`, until ? "Unsnooze" : "Snooze", (cx) => toggleSnoozeMenu(cx, it), "S"));
   const check = it.auto
     ? h_flex().id(`${k}-chk`).flex_none().size(20).items_center().justify_center().tooltip("Answered").child(iconEl("check", t.dim, 12))
@@ -282,7 +300,8 @@ function row(t, it, key) {
   const pname = it.proj?.loose ? "loose" : it.proj?.name ?? it.slug;
   // One 32px line per item (Linear Inbox): avatar, sender, text (full text on hover), project, actions, time, done.
   const text = it.kind === "task" ? `${TASK_EN[it.status]} · ${it.text}` : it.kind === "report" ? String(it.text).split("\n")[0] : it.text;
-  const main = trackHover(h_flex().id(k).h(T.h.row).px(12).gap(8).items_center(), "mb", k)
+  // Clicking the line reads it (opens the full text below it); the buttons keep their own clicks.
+  const main = trackHover(h_flex().id(k).h(T.h.row).px(12).gap(8).items_center().cursor_pointer().on_click((_e, cx) => { openItem(it); cx.notify(); }), "mb", k)
     .child(avatar)
     .child(div().w(120).flex_none().min_w(0).truncate().text_size(T.text.sm).font_medium().text_color(done ? t.muted : t.foreground).child(it.kind === "report" ? "Daily report" : it.from))
     .child(div().id(`${k}-txt`).flex_1().min_w(0).truncate().text_size(T.text.sm).text_color(done ? t.dim : t.muted).tooltip(it.text).child(text))
@@ -295,8 +314,7 @@ function row(t, it, key) {
   const expanded = S.openId === it.id;
   return v_flex().id(`${k}-w`).border_t_1().border_color(t.border)
     .child(main)
-    .when(expanded, (el) => el.child(div().pl(38).pr(T.pad.card).pb(T.sp.lg).text_size(T.text.sm).line_height(`${T.lh.base}px`)
-      .whitespace_normal().text_color(t.foreground).child(it.text)))
+    .when(expanded, (el) => el.child(detail(t, it, k)))
     .when(snoozing, (el) => el.child(h_flex().h(36).pl(38).pr(12).pb(T.sp.sm).gap(6).items_center()
       .child(div().flex_none().text_size(T.text.xs).text_color(t.dim).child("Snooze until"))
       .children(snoozeChoices().map((c, n) => h_flex().id(`${k}-sz-${c.k}`).flex_none().h(24).pl(T.sp.md).pr(T.sp.xs).gap(T.sp.sm).items_center().rounded(T.r.ctrl).cursor_pointer()
@@ -335,7 +353,7 @@ function navItem(it) {
 }
 
 export function mailboxView(ws, t, cx) {
-  if (!S.loading && now() - S.at > 3000) refresh(cx);
+  if ((!S.loading || now() - S.loading > 20000) && now() - S.at > 3000) refresh(cx);
   const openN = countOpen();
   const snoozedN = S.items.filter((x) => !isDone(x) && snoozedUntil(x)).length;
   const doneN = S.items.filter(isDone).length;
@@ -364,4 +382,34 @@ export function mailboxView(ws, t, cx) {
         .child(div().text_size(T.text.xs).font_medium().text_color(t.muted).child(label))
         .child(div().flex_1().text_size(T.text.xs).text_color(t.dim).child(String(items.length))))
       .children(items.map((it, i) => ws.navMark(row(t, it, `${g}-${i}`), navItem(it))))));
+}
+
+// The full text of an item, readable: an epic plan as one line per task, an approval's command in mono.
+function detail(t, it, k) {
+  if (it.kind === "task") {
+    return v_flex().pl(38).pr(T.pad.card).pb(T.sp.lg).gap(T.sp.sm)
+      .child(div().text_size(T.text.sm).font_medium().text_color(t.foreground).whitespace_normal().child(`#${it.taskId} ${it.title ?? ""}`))
+      .child(div().text_size(T.text.sm).line_height(`${T.lh.base}px`).whitespace_normal().text_color(t.foreground).child(it.reason || "No reason given."))
+      .child(div().text_size(T.text.xs).text_color(t.dim).child(`${it.from} is waiting for this. Answer: your reply goes to ${it.from} with task #${it.taskId}, and it unblocks the task.`));
+  }
+  const text = String(it.text ?? "");
+  const body = v_flex().pl(38).pr(T.pad.card).pb(T.sp.lg).gap(T.sp.sm);
+  const para = (x) => div().text_size(T.text.sm).line_height(`${T.lh.base}px`).whitespace_normal().text_color(t.foreground).child(x);
+  const plan = /^Approval #\d+: (Epic plan #\d+ .*?): (\d+ tasks?) - (.*)$/s.exec(text);
+  if (plan) {
+    const tasks = plan[3].split(/;\s*(?=#\d+)/).map((x) => x.trim()).filter(Boolean);
+    return body.child(para(`${plan[1]} · ${plan[2]}`))
+      .children(tasks.map((x, i) => h_flex().id(`${k}-pl-${i}`).gap(T.sp.sm).items_start()
+        .child(div().flex_none().w(16).text_size(T.text.sm).text_color(t.dim).child(`${i + 1}.`))
+        .child(div().flex_1().min_w(0).text_size(T.text.sm).line_height(`${T.lh.base}px`).whitespace_normal().text_color(t.foreground).child(x))))
+      .child(div().text_size(T.text.xs).text_color(t.dim).child("Approve moves these tasks to To Do. Revise sends the plan back with your note."));
+  }
+  const cmd = /^(.*?) \| command: (.*)$/s.exec(text);
+  if (cmd) {
+    return body.child(para(cmd[1]))
+      .child(div().px(T.sp.md).py(T.sp.sm).rounded(T.r.ctrl).bg(t.background).border_1().border_color(t.border)
+        .text_size(T.text.xs).font_family("JetBrains Mono").whitespace_normal().text_color(t.foreground).child(cmd[2]))
+      .child(div().text_size(T.text.xs).text_color(t.dim).child("Approve lets the agent run exactly this command once."));
+  }
+  return body.children(text.split(/\n+/).map((x) => para(x)));
 }

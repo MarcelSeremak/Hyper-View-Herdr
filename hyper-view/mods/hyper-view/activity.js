@@ -343,7 +343,11 @@ function ingestLine(P, f, line) {
 const ingest = (P, f, text) => { for (const line of String(text).split("\n")) ingestLine(P, f, line); };
 
 // ------------------------------------------------------------ cache (per project)
-const cachePath = (slug) => `${projectDir(slug)}/activity-cache.json`;
+// Mods may write only under ~/.config/herdr-app (fs/promises): the cache lives in this mod's data folder.
+// (It used to be ~/.herdr/projects/<slug>/activity-cache.json, which could never be written, so after every
+// restart the token counts started from zero and Codex logs already "seen" were never read again.)
+const actDir = () => `${String(appHome()).replace(/\\/g, "/").replace(/\/+$/, "")}/data/hyper-view/activity`;
+const cachePath = (slug) => `${actDir()}/${slug}.json`;
 async function project(slug) {
   if (A.P[slug]) return A.P[slug];
   const c = await readJson(cachePath(slug), null);
@@ -370,6 +374,7 @@ async function save(slug) {
   for (const [path, f] of Object.entries(P.files)) for (const it of Object.values(f.pending ?? {})) it._f = path;
   const files = Object.fromEntries(Object.entries(P.files).map(([k, f]) => [k, { ...f, pending: undefined, lastPrompt: undefined }]));
   const out = { ...P, files };
+  await fs.mkdir(actDir(), { recursive: true }).catch(() => {});
   await fs.writeFile(cachePath(slug), JSON.stringify(out)).then(() => { A.savedAt[slug] = Date.now(); A.dirty[slug] = false; }).catch((e) => { A.err = `save: ${e?.message ?? e}`; });
 }
 
@@ -390,6 +395,11 @@ async function poll(projects, full) {
   for (const p of projects) A.agents[p.slug] = (p.agents ?? []).map((a) => a.name);
   const Ps = {};
   for (const p of projects) Ps[p.slug] = await project(p.slug);
+  // Codex logs seen earlier whose project lost them (no cache): read them again.
+  for (const [path, cwd] of Object.entries(A.seen)) {
+    const slug = matchCwd(cwd, projects);
+    if (slug && Ps[slug] && !Ps[slug].files[path]) Ps[slug].files[path] = { off: 0, prov: "codex", slug, sid: null };
+  }
   const known = [];
   const recent = Date.now() - 3 * 86400000;
   for (const [slug, P] of Object.entries(Ps)) for (const [path, f] of Object.entries(P.files)) {
@@ -471,11 +481,11 @@ export function startActivity(cx, getProjects) {
     if (A.busy && Date.now() - A.busy < 120000) return;
     if (!force && !visible()) return;
     // One PowerShell helper at a time (A.busy), and back off while nothing changes: 5 s, 10 s, 20 s …
-    // up to 15 s while an agent runs and the window is active, 60 s otherwise.
+    // up to 30 s while an agent runs and the window is active, 2 min otherwise.
     if (!force && A.quietAt) {
       let active = true;
       try { active = win().active !== false; } catch {}
-      const cap = active && (agents() ?? []).length ? 15000 : 60000;
+      const cap = active && (agents() ?? []).length ? 30000 : 120000;
       if (Date.now() - A.quietAt < Math.min(cap, 5000 * 2 ** Math.min(4, A.quietN ?? 0))) return;
     }
     const projects = (getProjects() ?? []).filter((p) => p?.slug);

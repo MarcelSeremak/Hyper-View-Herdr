@@ -12,8 +12,9 @@ const KSM = new WeakMap();
 const KS = (o) => { let s = KSM.get(o); if (!s) KSM.set(o, (s = {})); return s; };
 import { liveBars } from "./charts.js";
 
-const LOCAL_EVERY = 5000;
-const VM_EVERY = 15000;
+const LOCAL_EVERY = 30000; // local CPU/RAM/disk (one PowerShell per probe); 2 min in the background
+const VM_EVERY = 5 * 60 * 1000; // every machine over ssh, once per 5 min
+const VM_PARALLEL = 4; // ssh probes running at once
 
 // Two CPU/network samples 1 s apart, memory, disk "/", OS, cores, uptime.
 const VM_PROBE = [
@@ -69,18 +70,39 @@ export class Status {
       const before = this.machines.map((m) => m.name).join(",");
       this.machines = await loadMachines();
       this.projects = await listProjects().catch(() => []);
-      if (this.machines.map((m) => m.name).join(",") !== before) this.probeVms(cx);
+      if (this.machines.map((m) => m.name).join(",") !== before) this.probeVms(cx, true);
       cx.notify();
-    }), 10000, "status");
-    repeat(cx, VM_EVERY, (cx) => this.probeVms(cx), alive);
+    }), 60000, "status");
+    repeat(cx, 60000, (cx) => this.probeVms(cx), alive); // probeVms itself waits VM_EVERY between rounds
+    // Once per change in how Herdr logs in (hp vm sync-config rewrites every "herdr-<name>" ssh block),
+    // then every machine is checked again at once.
+    // Editors left running from before this change: close them (not the one on screen, not unsaved ones).
+    cx.timer.after(5000, () => {
+      const v = shared("mp.view");
+      import("./editor.js").then((m) => m.closeStaleEditors(v?.kind === "vm" && v.tab === "editor" ? v.name : null)).catch(() => {});
+    });
+    // Once after a change in the agents' contract (AGENTS.md rule 9: questions / permissions via the Mailbox):
+    // regenerate every project's AGENTS.md.
+    if (!demo() && shared("mp.docsVer") !== 9) {
+      cx.spawn(async () => {
+        const r = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", hpScript(), "project", "docs", "--all"], { timeout: 120000 }).catch(() => null);
+        if (r?.code === 0) setShared("mp.docsVer", 9);
+      });
+    }
+    if (!demo() && shared("mp.sshCfgVer") !== 2) {
+      cx.spawn(async (cx) => {
+        const r = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", hpScript(), "vm", "sync-config"], { timeout: 60000 }).catch(() => null);
+        if (r?.code === 0) { setShared("mp.sshCfgVer", 2); this.machines = await loadMachines(); this.probeVms(cx, true); }
+      });
+    }
   }
 
   probeLocal(cx) {
     if (this.busy) return;
-    // Each probe starts PowerShell: every 5 s while the window is active, every 30 s otherwise.
+    // Each probe starts PowerShell: every 30 s while the window is active, every 2 min otherwise.
     let active = true;
     try { active = win().active !== false; } catch {}
-    if (!active && Date.now() - (this.localAt ?? 0) < 30000) return;
+    if (!active && Date.now() - (this.localAt ?? 0) < 120000) return;
     this.localAt = Date.now();
     this.busy = true;
     cx.spawn(async (cx) => {
@@ -98,15 +120,22 @@ export class Status {
     });
   }
 
-  probeVms(cx) {
+  probeVms(cx, force = false) {
     const names = new Set(this.machines.map((m) => m.name));
     for (const k of Object.keys(this.stats)) if (!names.has(k)) delete this.stats[k];
     let left = this.machines.length;
     if (!left) { setSharedIf("mp.vmstats", {}); return; }
     // One round of ssh probes at a time (a slow or hanging machine must not stack rounds).
-    if (this.vmBusy && Date.now() - this.vmBusy < 30000) return;
+    if (!force && this.vmBusy && Date.now() - this.vmBusy < 30000 + this.machines.length * 1000) return;
+    // A round every VM_EVERY (5 min), at most VM_PARALLEL ssh processes at once. `force`: the machine
+    // list changed, probe now (new machines get stats at once).
+    if (!force && this.vmAt && Date.now() - this.vmAt < VM_EVERY - 1000) return;
+    this.vmAt = Date.now();
     this.vmBusy = Date.now();
-    for (const m of this.machines) {
+    const queue = [...this.machines];
+    const worker = (cx) => {
+      const m = queue.shift();
+      if (!m) return;
       cx.spawn(async (cx) => {
         let st;
         try {
@@ -118,10 +147,11 @@ export class Status {
         const h = (this.history[m.name] ??= []);
         if (st.ok) { h.push(Math.round(st.cpu)); if (h.length > 40) h.shift(); }
         this.stats[m.name] = { ...st, at: Date.now(), cpuHistory: [...h] };
-        if (--left === 0) { this.vmBusy = 0; setSharedIf("mp.vmstats", { ...this.stats }, ["at"]); }
-        cx.notify();
+        if (--left === 0) { this.vmBusy = 0; setSharedIf("mp.vmstats", { ...this.stats }, ["at"]); cx.notify(); }
+        worker(cx);
       });
-    }
+    };
+    for (let i = 0; i < VM_PARALLEL; i++) worker(cx);
   }
 
   // Slim 24 px IDE status bar (VS Code: F6 lands here, ←/→ move between entries, Enter runs one).
@@ -162,7 +192,7 @@ export class Status {
       go: () => { if (offline.length) { openVm(offline[0]); showCenter("mp-view"); } else { setShared("mp.explorer", "vms"); setShared("mp.focus", { to: "sidebar", reveal: "vms", at: Date.now() }); } } });
     for (const r of limitRows()) {
       const main = r.wins[0]?.[1];
-      const signedOut = Boolean(r.err) && r.err !== "Checking…";
+      const signedOut = r.signedOut;
       out.push({ id: `lim-${r.key}`, side: "r", dot: r.color, text: `${r.name} ${signedOut ? "log in" : main ? `${Math.round(main.pct)}%` : "–"}`, color: signedOut ? WARN : main ? limitColor(main.pct, t) : t.dim,
         tip: `${r.name} usage left\n${limitTip(r)}\nEnter: ${signedOut ? "log in" : "refresh"}`, go: () => (signedOut ? loginProvider(r.key) : refreshLimits()) });
     }
@@ -187,8 +217,36 @@ export class Status {
     cx.notify();
   }
 
+  // One machine right away (shared "mp.vmProbeAsk" = { vm, at }: after a password / key change, "Check now").
+  probeOne(cx, name) {
+    const m = this.machines.find((x) => x.name === name);
+    if (!m) return;
+    cx.spawn(async (cx) => {
+      let st;
+      try {
+        const r = await exec("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", sshAlias(m.name), VM_PROBE], { timeout: 14000 });
+        st = r.code === 0 ? { ...parseProbe(r.stdout), ok: true } : { ok: false, err: (r.stderr || "").trim().split("\n").pop() || `exit code ${r.code}` };
+      } catch (e) { st = { ok: false, err: String(e?.message ?? e) }; }
+      const h = (this.history[m.name] ??= []);
+      if (st.ok) { h.push(Math.round(st.cpu)); if (h.length > 40) h.shift(); }
+      this.stats[m.name] = { ...st, at: Date.now(), cpuHistory: [...h] };
+      setSharedIf("mp.vmstats", { ...this.stats }, ["at"]);
+      cx.notify();
+    });
+  }
+
   render(cx) {
     const t = theme();
+    // The machine editor lives only while its Editor tab is shown (editor.js closeEditor).
+    const v = shared("mp.view");
+    const edKey = v?.kind === "vm" && v.tab === "editor" ? v.name : null;
+    if (this.edOpen && this.edOpen !== edKey) {
+      const vm = this.edOpen;
+      cx.timer.after(1, () => { import("./editor.js").then((m) => m.closeEditor(vm)).catch(() => {}); });
+    }
+    this.edOpen = edKey;
+    const ask = shared("mp.vmProbeAsk");
+    if (ask?.at && ask.at !== this.probeAskAt) { this.probeAskAt = ask.at; if (Date.now() - ask.at < 30000) cx.timer.after(1, (cx) => this.probeOne(cx, ask.vm)); }
     if (!KS(this).fh && !KS(this).asked) { KS(this).asked = true; cx.timer.after(1, (cx) => { try { KS(this).fh = cx.focus_handle(); } catch {} cx.notify(); }); }
     const fr = shared("mp.focus");
     if (KS(this).fh && fr && fr.at !== this.focusAt) {

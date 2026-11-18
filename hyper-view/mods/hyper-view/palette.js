@@ -36,6 +36,8 @@ export const ACTIONS = [
   { cmd: "new-task", title: "New task", icon: "check-square", words: "create add todo issue", go: async () => { const s = await firstProject(); if (s) openForm("task-add", { project: s }); else openForm("project-new"); } },
   { cmd: "add-machine", title: "Add machine", icon: "server", words: "vm ssh host", go: () => openForm("vm-add", {}) },
   { cmd: "add-secret", title: "Add secret", icon: "key", words: "token password credential", go: () => openForm("secret-add", {}) },
+  { cmd: "add-skill", title: "New skill", icon: "puzzle", words: "prompt skill create", go: () => openForm("skill-edit", {}) },
+  { cmd: "add-mcp", title: "Add MCP server", icon: "plug", words: "mcp tool server create", go: () => openForm("mcp-edit", {}) },
   { cmd: "chat-full", title: "Toggle chat full width", icon: "maximize", words: "conversation expand", go: () => setShared("mp.chatFull", !shared("mp.chatFull")) },
   { cmd: "focus-sidebar", title: "Explorer: Projects", icon: "layers", words: "focus sidebar tree navigate", go: () => runNav("focus-sidebar") },
   { cmd: "explorer-machines", title: "Explorer: Machines", icon: "server", words: "focus sidebar tree vm hosts", go: () => runNav("explorer-machines") },
@@ -45,6 +47,7 @@ export const ACTIONS = [
   { cmd: "zone-next", title: "Focus next zone", icon: "compass", words: "f6 focus part region", go: () => runNav("zone-next") },
   { cmd: "focus-chat", title: "Focus chat composer", icon: "messages", words: "chat message type", go: () => runNav("focus-chat") },
   { cmd: "shortcuts", title: "Keyboard shortcuts", icon: "list", words: "keys hotkeys help ? cheat sheet", inline: "keys", go: () => openPaletteWith({ mode: "keys" }) },
+  { cmd: "reload", title: "Reload (projects, agents, tasks…)", icon: "refresh", words: "refresh update reload sync", go: () => setShared("mp.reloadAt", Date.now()) },
   { cmd: "tour", title: "Start tutorial", icon: "compass", words: "tour help onboarding", go: () => import("./tour.js").then((m) => m.startTour()) },
   { cmd: "demo", title: () => (demo() ? "Turn demo off" : "Turn demo on"), icon: "flask", words: "demo sample data preview", go: () => setShared("mp.demo", !demo()) },
 ];
@@ -54,6 +57,8 @@ const VIEWS = [
   { cmd: "tokens", title: "Tokens & Access", icon: "key", words: "secrets credentials passwords keys", go: goView(openSecrets) },
   { cmd: "map", title: "Agent map", icon: "map", words: "ghosts village agents where", go: goView(() => setShared("mp.view", { kind: "map" })) },
   { cmd: "clipboard", title: "Clipboard", icon: "paperclip", words: "notes snippets", go: goView(openClipboard) },
+  { cmd: "skills", title: "Skills", icon: "puzzle", words: "prompts skill library attach agent", go: goView(() => setShared("mp.view", { kind: "skills" })) },
+  { cmd: "mcp", title: "MCP servers", icon: "plug", words: "mcp tools servers integrations attach agent", go: goView(() => setShared("mp.view", { kind: "mcp" })) },
   { cmd: "settings", title: "Settings", icon: "settings", words: "preferences", key: "ctrl-,", go: () => run("app.settings", {}) },
 ];
 // Runs a palette action / view by its command name (Ctrl+K etc. arrive here via notifier.js).
@@ -184,7 +189,7 @@ export class Palette {
           go: () => { selectProject(p.slug, p.loose ? "overview" : "agents"); if (!p.loose) setShared("mp.openAgent", { slug: p.slug, name: a.name, at: Date.now() }); showCenter("mp-view"); } });
         if (!p.loose && full) out.push(live
           ? { id: `stop:${p.slug}:${a.name}`, group: "Actions", title: `Stop agent ${a.name}`, sub: p.name, icon: "square", words: "kill", go: () => import("./supervisor.js").then((m) => { m.markManualStop(p.slug, a.name); run("terminal.kill", { terminal: live.address }); }) }
-          : { id: `start:${p.slug}:${a.name}`, group: "Actions", title: `Start agent ${a.name}`, sub: p.name, icon: "play", words: "run launch", go: () => startAgent(full, a) });
+          : { id: `start:${p.slug}:${a.name}`, group: "Actions", title: `Start agent ${a.name}`, sub: p.name, icon: "play", words: "run launch", go: () => startAgent(full, a, undefined, { show: true }) });
       }
       for (const x of full?.tasks ?? []) {
         if (x.status === "done") continue;

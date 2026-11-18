@@ -44,10 +44,12 @@ export const MODES = {
   projects: { left: "open", right: "open", section: "projects" },
   vms: { left: "open", right: "hidden", section: "vms" },
   agents: { left: "open", right: "open", section: "agents" },
-  mailbox: { left: "rail", right: "hidden" },
+  mailbox: { left: "rail", right: "open" }, // chat on the right half (chat.js), questions on the left
   tokens: { left: "rail", right: "hidden" },
   map: { left: "rail", right: "hidden" },
   clipboard: { left: "rail", right: "hidden" },
+  skills: { left: "rail", right: "hidden" },
+  mcp: { left: "rail", right: "hidden" },
   settings: { left: "rail", right: "hidden" },
 };
 // Loose agents are projects of their own (slug agent-<name>); the sidebar keeps the exact set.
@@ -58,7 +60,7 @@ export function modeOf(v) {
     case "vm": case "machines": return "vms";
     case "secrets": return "tokens";
     case "map": return "map";
-    case "mailbox": case "clipboard": case "settings": return v.kind;
+    case "mailbox": case "clipboard": case "settings": case "skills": case "mcp": return v.kind;
     default: return "dash";
   }
 }
@@ -157,7 +159,7 @@ export class Lights {
 // (Projects › E-commerce › Tasks) + status + icon actions. Keyboard (F6 zone "header"): ←/→ previous / next
 // sub-view of the project or machine (the explorer's children), Home/End, 1–6, Enter/↓ into the view,
 // "." the entity's actions (palette), Esc back to the view.
-export const PROJECT_TABS = [["overview", "Overview"], ["agents", "Agents"], ["tasks", "Tasks"], ["epics", "Epics"], ["machines", "Machines"], ["activity", "Activity"]];
+export const PROJECT_TABS = [["overview", "Overview"], ["agents", "Agents"], ["tasks", "Tasks"], ["epics", "Epics"], ["machines", "Machines"], ["credentials", "Credentials"], ["activity", "Activity"]];
 export const VM_TABS = [["overview", "Overview"], ["editor", "Editor"], ["access", "Access"]];
 // Opens a sub-view of the current project / machine (the machine Editor starts the editor).
 export function pickTab(k) {
@@ -207,7 +209,7 @@ export class Header {
       this.machines = await loadMachines();
       this.secrets = await loadSecrets();
       cx.notify();
-    }), 4000, "header");
+    }), 30000, "header"); // folder watch reloads at once; timer = fallback
   }
 
   key(e, cx) {
@@ -367,6 +369,8 @@ export class Header {
     if (v.kind === "clipboard") {
       return this.frame(t, crumbs(["Clipboard"]), act("mp-h-clip", "plus", "Add snippet", () => openForm("snippet", {})), seg, null);
     }
+    if (v.kind === "skills") return this.frame(t, crumbs(["Skills"]), act("mp-h-skill", "plus", "New skill", () => openForm("skill-edit", {})), seg, null);
+    if (v.kind === "mcp") return this.frame(t, crumbs(["MCP servers"]), act("mp-h-mcp", "plus", "Add server", () => openForm("mcp-edit", {})), seg, null);
     if (v.kind === "machines") return this.frame(t, crumbs([["Machines", reveal("vms")], "All machines"]), act("mp-h-vadd", "plus", "Add machine", () => openForm("vm-add", {})), seg, `${this.machines.length} machine${this.machines.length === 1 ? "" : "s"}`);
     if (v.kind === "settings") return this.frame(t, crumbs(["Settings"]), null, seg, null);
     if (v.kind === "map") return this.frame(t, crumbs(["Map"]), null, seg, shared("mp.mapSub") ?? null);
@@ -387,6 +391,8 @@ export class Header {
         .when(Boolean(sub), (el) => el.child(div().min_w(0).truncate().text_size(T.text.xs).text_color(t.dim).child(sub))))
       .when(this.kbOn, (el) => el.child(div().flex_none().text_size(T.text.xs).text_color(t.dim).child(nav ? "← → view · ↵ open · . actions" : "↵ view · . actions")))
       .when(Boolean(actions), (el) => el.child(actions))
+      // Reload: re-reads projects, agents, tasks, machines, secrets everywhere (the views also reload by themselves).
+      .child(iconButton(t, "mp-h-reload", "refresh", (_e, cx) => { setShared("mp.reloadAt", Date.now()); toast("Reloaded", "", "info"); cx.notify(); }, "Reload", { size: 26 }))
       .when(Boolean(seg), (el) => el.child(div().flex_none().w(1).h(16).bg(t.border)).child(seg));
   }
 }

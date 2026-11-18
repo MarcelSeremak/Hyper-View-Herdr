@@ -313,6 +313,7 @@ function herdrChanged() {
 // Reload now, every `every` ms and after changes under ~/.herdr (a burst of writes = one reload).
 // `key` names the view (one per window): a newer build's view supersedes the old one's loops.
 // A reload that returns a Task (cx.spawn) is not started again while the previous one still runs.
+export const reloadAll = () => setShared("mp.reloadAt", Date.now());
 export function watchData(cx, reload, every = 4000, key = null) {
   const alive = key ? claimJob(`watch:${key}`) : () => true;
   let last = null, lastAt = 0;
@@ -323,6 +324,15 @@ export function watchData(cx, reload, every = 4000, key = null) {
   };
   go(cx);
   repeat(cx, every, go, alive);
+  // Reload now (reloadAll(): the header's Reload button, and after every saved dialog): checked every
+  // 0.7 s in memory, so a new agent / task / project shows up at once instead of at the next poll.
+  let seenReload = shared("mp.reloadAt") ?? 0;
+  repeat(cx, 700, (cx) => {
+    const r = shared("mp.reloadAt") ?? 0;
+    if (r === seenReload) return;
+    if (last && typeof last.is_done === "function" && !last.is_done() && Date.now() - lastAt < 60000) return; // after the running one
+    seenReload = r; lastAt = Date.now(); last = reload(cx);
+  }, alive);
   cx.spawn(async (cx) => {
     let at = 0;
     for (;;) {
@@ -341,7 +351,15 @@ export function watchData(cx, reload, every = 4000, key = null) {
 export function liveAgent(project, name) {
   if (!project) return null;
   if (demo()) return DEMO_LIVE[name] && project.slug === DEMO_PROJECT.slug ? { address: `demo-${name}`, status: DEMO_LIVE[name] } : null;
-  return agents().find((a) => a.space_name === project.name && a.tab_name === name) ?? null;
+  return agentsNow().find((a) => a.space_name === project.name && a.tab_name === name) ?? null;
+}
+// agents() asks the host each time; a dashboard render calls liveAgent a few hundred times (every card,
+// row and avatar), which ran the render out of time. One snapshot per 250 ms is plenty for a status dot.
+let AGS = { at: 0, list: [] };
+function agentsNow() {
+  const n = Date.now();
+  if (n - AGS.at > 250) AGS = { at: n, list: agents() ?? [] };
+  return AGS.list;
 }
 // Team lead (answers team messages; same rule as hp's Lead-Of): flagged lead, else name/role says
 // lead/architect/coordinator, else the first agent.
@@ -372,19 +390,46 @@ export function nextTask(project, name) {
   const order = { urgent: 0, high: 1, normal: 2, low: 3 };
   return project.tasks.filter((x) => x.agent === name && x.status === "todo").sort((a, b) => (order[a.priority] ?? 2) - (order[b.priority] ?? 2))[0] ?? null;
 }
-export function startAgent(project, agent, goal) {
-  const argv = agent.app === "codex" ? ["codex", "--no-daemon"] : ["claude"];
+// Text that survives being passed as one shell argument: " → ', ` → ', $ → ＄, no control characters.
+export const shellSafe = (text) => String(text ?? "").replace(/["“”„]/g, "'").replace(/`/g, "'").replace(/\$/g, "＄").replace(/[\r\n\t]+/g, " ");
+export function startAgent(project, agent, goal, { show = false, quiet = false } = {}) {
+  // Codex agents run without Codex's OS sandbox (the human's choice, 2026-11-17): on Windows that sandbox could
+  // not open hp's database (~/.herdr/herdr.db) even with write access, so hp (memory, inbox, tasks, approvals)
+  // did not work. They now run like Claude Code agents: hp's own checks apply (risk level approvals in the
+  // Mailbox, secret masking, production machines), and Codex never asks in its terminal.
+  const argv = agent.app === "codex" ? ["codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"] : ["claude"];
   const task = [
     `You are agent "${agent.name}" in project "${project.name}".`,
     agent.role ? `Your role: ${agent.role}.` : "",
     `Read AGENTS.md in the current folder: it is your contract (sacred boundaries, principles, working loop). Your risk level: ${agent.risk ?? project.agents?.find((x) => x.name === agent.name)?.risk ?? "balanced"}. Pass --as ${agent.name} to every hp command.`,
     `First run: hp recall "${String((project.tasks ? currentTask(project, agent.name)?.title ?? nextTask(project, agent.name)?.title : null) ?? (goal && String(goal).length <= 160 ? goal : "my next task")).replace(/["\r\n`$]+/g, " ").trim().slice(0, 80)}" --as ${agent.name} (your tasks, team decisions, gotchas, your last session note).`,
+    `Decide technical questions yourself; ask the human only about business decisions and risky steps (AGENTS.md section 'Working with ty'), through the lead, in plain simple Polish with numbered choices; keep working on what does not depend on the answer. Never wait for an answer in this terminal: questions go to the Mailbox (hp say --to ty), permissions via hp ask then hp wait-approval.`,
     goal ? `Task from the human: ${goal}` : `Then: hp agent list, hp task list, hp inbox --as ${agent.name}.`,
   ].filter(Boolean).join(" ");
   const folder = winPath(projectDir(project.slug));
-  const sp = projectSpace(project);
-  if (sp) run("tab.new", { space: sp.id, name: agent.name, folder, argv, task });
-  else run("space.new", { name: project.name, folder, tab: agent.name, argv, task });
+  // Skills and MCP servers attached to this agent (kit.js) are written first, then added to its start.
+  const launch = (extra, note) => {
+    const av = [...argv, ...(extra ?? [])];
+    // Herdr hands the first message to the agent through the shell (PowerShell) inside double quotes:
+    // a " inside ends the argument early (codex: "unexpected argument 'VDS'"), $ and ` would be expanded.
+    const tk = shellSafe(note ? `${task} ${note}` : task);
+    const sp = projectSpace(project);
+    if (sp) run("tab.new", { space: sp.id, name: agent.name, folder, argv: av, task: tk });
+    else run("space.new", { name: project.name, folder, tab: agent.name, argv: av, task: tk });
+  };
+  if (!quiet) toast(`Starting ${agent.name}…`, "Its terminal opens in Terminals (Ctrl+`).", "info");
+  // Writing the kit must never block the start: after 8 s the agent starts without it.
+  let done = false;
+  const go = (extra, note, err) => {
+    if (done) return; done = true;
+    if (err) toast("Skills / MCP not applied", err, "error");
+    try { launch(extra, note); if (show) showCenter("mp-terms"); } catch (e) { toast(`Could not start ${agent.name}`, String(e?.message ?? e), "error"); }
+    setShared("mp.lastStart", { agent: agent.name, project: project.slug, argv: [...argv, ...(extra ?? [])], err: err ?? null, at: Date.now() });
+    setShared("mp.reloadAt", Date.now());
+  };
+  // Lazy import: kit.js → form.js → lib.js at load time would be a cycle (form.js uses lib's constants).
+  import("./kit.js").then((m) => m.prepareKit(project, agent)).then((k) => go(k.argv, k.note), (e) => go([], "", String(e?.message ?? e)));
+  sleepMs(8000).then(() => go([], "", "Preparing skills / MCP servers took too long."));
 }
 // Opening a machine = its view, Editor tab (nvim + optional terminal underneath).
 export function openSsh(vm, _project) {
@@ -504,6 +549,9 @@ export function scrollY(id, el, { grow = true } = {}) {
   const area = el.id(id).overflow_y_scroll();
   const hot = Boolean(SB_HOVER[id]);
   return v_flex().relative().w_full().when(grow, (w) => w.flex_1().min_h(0))
+    // A fixed-height list inside a scrolling page/dialog (grow: false): the wheel over it scrolls only
+    // the list, not the page around it.
+    .when(!grow, (w) => w.on_scroll_wheel((_e, cx) => cx.stop_propagation()))
     .child(grow ? area.flex_1().min_h(0) : area)
     .child(div().id(`${id}-sbzone`).absolute().top(2).bottom(2).right(0).w(10)
       .on_hover((h, cx) => { SB_HOVER[id] = h; cx.notify(); })
@@ -665,6 +713,7 @@ export async function installKey(vm) {
     if (!g || g.state === "live") continue;
     const out = (await hc(["read", t.address, "--lines", "8"]).catch(() => ({ stdout: "" }))).stdout.trim().split("\n").filter(Boolean).slice(-3).join(" ");
     if (g.exit_code === 0) {
+      setShared("mp.vmProbeAsk", { vm, at: Date.now() }); // refresh its status now, not at the next 5-min round
       setShared("mp.vmterm", { vm, state: "connecting", label: "SSH key installed. Opening the editor…", at: Date.now() });
       await (await import("./editor.js")).openEditor(vm);
     } else {

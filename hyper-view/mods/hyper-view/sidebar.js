@@ -22,7 +22,7 @@ import { openForm } from "./form.js";
 import { loadMailbox, publishCount } from "./mailbox.js";
 import { LEFT, isCollapsed, MODES, modeOf, applyMode, userToggleLeft, setChat, chatState, wantedLayout, openAgentPage } from "./toolbar.js";
 
-const LIMITS_EVERY = 3 * 60 * 1000;
+const LIMITS_EVERY = 10 * 60 * 1000;
 const winLabel = (m) => (m === 300 ? "5h" : m === 10080 ? "Week" : m >= 40000 ? "Month" : m ? `${Math.round(m / 60)}h` : "");
 function left(w) {
   if (!w) return null;
@@ -40,14 +40,26 @@ export function limitRows() {
   const L = shared("mp.limits");
   const rows = [];
   const c = L?.claude;
-  rows.push({ key: "claude", name: "Claude", color: "#c98a6c", glyph: "zap", err: c && !c.ok ? c.err : !L ? "Checking…" : null,
-    wins: c?.ok ? [["5h", left(c.five_hour)], ["Week", left(c.seven_day)]].filter(([, v]) => v) : [] });
+  // Only a real login problem shows "log in"; anything else (429 Too Many Requests, network) is a note,
+  // and the last good numbers stay (loadLimits keeps them).
+  const cAuth = Boolean(c && !c.ok && AUTH_ERR.test(c.err ?? ""));
+  const cShown = c?.ok ? c : L?.claudeLast ?? null;
+  rows.push({ key: "claude", name: "Claude", color: "#c98a6c", glyph: "zap", err: cAuth ? c.err : !L ? "Checking…" : null,
+    note: c && !c.ok && !cAuth ? `Could not refresh: ${c.err}${cShown ? " (showing the last numbers)" : ""}` : null,
+    wins: cShown && !cAuth ? [["5h", left(cShown.five_hour)], ["Week", left(cShown.seven_day)]].filter(([, v]) => v) : [] });
   const x = L?.codex;
-  rows.push({ key: "codex", name: "Codex", color: "#6aa58f", glyph: "terminal", err: x && !x.ok ? x.err : !L ? "Checking…" : null,
+  // Codex limits come from local session logs: "no sessions / no data yet" is not a missing login.
+  const xNoData = Boolean(x && !x.ok && /^No (Codex sessions|rate-limit data)/.test(x.err ?? ""));
+  rows.push({ key: "codex", name: "Codex", color: "#6aa58f", glyph: "terminal",
+    // Codex limits are read from local logs: no error here means a missing login.
+    err: !L ? "Checking…" : null,
+    note: xNoData ? `${x.err} (run Codex once to see limits)` : x && !x.ok ? `Could not read: ${x.err}` : null,
     wins: x?.ok ? [[winLabel(x.primary?.window_minutes) || "Limit", left(x.primary)], [winLabel(x.secondary?.window_minutes) || "Weekly", left(x.secondary)]].filter(([, v]) => v) : [] });
+  for (const r of rows) r.signedOut = Boolean(r.err) && r.err !== "Checking…";
   return rows;
 }
-export const limitTip = (r) => r.err ?? r.wins.map(([l, v]) => `${l}: ${Math.round(v.pct)}% left${v.reset ? ` · resets in ${until(v.reset)}` : ""}`).join("\n");
+const AUTH_ERR = /sign in|\/login|log ?in|\b40[13]\b|unauthori[sz]ed|forbidden|invalid.*token|token.*expired/i;
+export const limitTip = (r) => r.err ?? [r.note, ...r.wins.map(([l, v]) => `${l}: ${Math.round(v.pct)}% left${v.reset ? ` · resets in ${until(v.reset)}` : ""}`)].filter(Boolean).join("\n");
 export const limitColor = (p, t) => (p < 15 ? BAD : p < 35 ? WARN : t.foreground);
 export const refreshLimits = () => setShared("mp.limitsAsk", Date.now());
 
@@ -72,6 +84,8 @@ export const ACTIVITY = [
   { id: "clipboard", icon: "paperclip", label: "Clipboard", cmd: "clipboard", g: "G C" },
   { id: "tokens", icon: "key", label: "Tokens & Access", cmd: "tokens" },
   { id: "map", icon: "map", label: "Agent map", cmd: "map" },
+  { id: "skills", icon: "puzzle", label: "Skills", cmd: "skills", g: "G K" },
+  { id: "mcp", icon: "plug", label: "MCP servers", cmd: "mcp", g: "G I" },
   { id: "settings", icon: "settings", label: "Settings", cmd: "settings", bottom: true },
 ];
 const keyLabel = (k) => String(k ?? "").split("-").map((p) => ({ ctrl: "Ctrl", shift: "Shift", alt: "Alt", "`": "`" }[p] ?? (p.length === 1 ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1)))).join("+");
@@ -93,7 +107,7 @@ export async function openMode(mode) {
   const go = (v) => { setShared("mp.view", v); showCenter("mp-view"); };
   const last = modeViews()[mode];
   if (mode === "dash") return go({ kind: "dashboard" });
-  if (mode === "mailbox" || mode === "clipboard") return go({ kind: mode });
+  if (mode === "mailbox" || mode === "clipboard" || mode === "skills" || mode === "mcp") return go({ kind: mode });
   if (mode === "tokens") return go({ kind: "secrets" });
   if (mode === "map") return go({ kind: "map" });
   if (mode === "settings") return run("app.settings", {});
@@ -144,7 +158,7 @@ export class Sidebar {
     globalThis.__hvOaSeen ??= shared("mp.openAgent")?.at ?? 0;
     this.loadLimits(cx);
     repeat(cx, LIMITS_EVERY, (cx) => this.loadLimits(cx), claimJob("sidebar.limits"));
-    watchData(cx, (cx) => this.reload(cx), 4000, "sidebar");
+    watchData(cx, (cx) => this.reload(cx), 30000, "sidebar"); // folder watch reloads at once; timer = fallback
   }
 
   // Inputs, focus handles and the scroll handle (also for copies kept by the in-place reload).
@@ -185,10 +199,28 @@ export class Sidebar {
   }
 
   // Claude Code and Codex usage limits (hp limits). Stored shared so every copy sees them.
-  loadLimits(cx) {
+  // Throttled across reloads (shared "mp.limits".checked): at most once per 5 min unless `force` (Refresh),
+  // and after a 429 from the usage endpoint nothing is asked for 15 min.
+  loadLimits(cx, force = false) {
+    const L = shared("mp.limits");
+    const now = Date.now();
+    if (now < (L?.backoffUntil ?? 0)) return;
+    if (!force && L?.checked && now - L.checked < 5 * 60 * 1000) return;
+    if (globalThis.__hvLimitsBusy && now - globalThis.__hvLimitsBusy < 60000) return;
+    globalThis.__hvLimitsBusy = now;
     cx.spawn(async (cx) => {
       const r = await hp(["limits"], {}, 30000);
-      try { if (r.ok) setSharedIf("mp.limits", { ...JSON.parse(r.out), checked: Date.now() }, ["checked"]); } catch {}
+      globalThis.__hvLimitsBusy = 0;
+      try {
+        if (r.ok) {
+          const next = JSON.parse(r.out);
+          const prev = shared("mp.limits");
+          const limited = !next.claude?.ok && /429|too many/i.test(next.claude?.err ?? "");
+          setSharedIf("mp.limits", { ...next, checked: Date.now(),
+            claudeLast: next.claude?.ok ? next.claude : prev?.claude?.ok ? prev.claude : prev?.claudeLast ?? null,
+            backoffUntil: limited ? Date.now() + 15 * 60 * 1000 : 0 }, ["checked"]);
+        }
+      } catch {}
       cx.notify();
     });
   }
@@ -255,6 +287,7 @@ export class Sidebar {
         child("tasks", "Tasks", "check-square", d?.tasks ?? null);
         child("epics", "Epics", "layers", d?.epics || null);
         child("machines", "Machines", "server", p.machines.length || null);
+        child("credentials", "Credentials", "key", null);
         child("activity", "Activity", "activity");
       }
     } else if (sec === "vms") {
@@ -550,7 +583,7 @@ export class Sidebar {
   limitsLine(t) {
     const warn = limitRows().map((r) => {
       const main = r.wins[0]?.[1];
-      const signedOut = Boolean(r.err) && r.err !== "Checking…";
+      const signedOut = r.signedOut;
       return signedOut ? { r, signedOut, text: `${r.name}: login needed` }
         : main && main.pct < 15 ? { r, main, text: `${r.name}: ${Math.round(main.pct)}% left${main.reset ? ` · resets in ${until(main.reset)}` : ""}` } : null;
     }).filter(Boolean);
@@ -565,7 +598,7 @@ export class Sidebar {
           .border_1().border_color(t.border).text_size(T.text.xs).font_medium().text_color(signedOut ? WARN : t.muted)
           .hover((s) => s.bg(t.hover).text_color(t.foreground))
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-          .on_click((_e, cx) => (signedOut ? loginProvider(r.key) : this.loadLimits(cx)))
+          .on_click((_e, cx) => (signedOut ? loginProvider(r.key) : this.loadLimits(cx, true)))
           .child(signedOut ? "Log In" : "Refresh"))));
   }
 
@@ -580,7 +613,7 @@ export class Sidebar {
     const tl = shared("mp.toggleLeft"); // Ctrl+Shift+B (shortcuts.js)
     if (tl && tl !== this.toggleLeftAt) { const fresh = this.toggleLeftAt !== undefined || Date.now() - tl < 1500; this.toggleLeftAt = tl; if (fresh && Date.now() - tl < 1500 && !globalThis.__hvToggling) { globalThis.__hvToggling = true; userToggleLeft(cx); cx.timer.after(400, () => { globalThis.__hvToggling = false; }); } }
     const fl = shared("mp.limitsAsk");
-    if (fl && fl !== this.limitsAsk) { this.limitsAsk = fl; this.loadLimits(cx); }
+    if (fl && fl !== this.limitsAsk) { this.limitsAsk = fl; this.loadLimits(cx, true); }
     const se = JSON.stringify(shared("mp.expanded") ?? []);
     if (se !== this.lastExp) { const was = this.lastExp; this.lastExp = se; this.expanded = new Set(JSON.parse(se)); if (was !== undefined) this.reload(cx); }
     if (K(this).fh) this.takeFocus(cx, v);

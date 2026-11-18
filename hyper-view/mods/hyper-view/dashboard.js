@@ -8,11 +8,11 @@ import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import { shared, setShared, run } from "herdr";
 import {
   demo, listProjects, loadProject, loadEvents, loadMachines, liveAgent, currentTask, selectProject, showCenter, hp, toast, startAgent,
-  vmStats, agentAvatar, clear, arr, tile, colorFor, OK, WARN, BAD, INFO, TASK_COLOR, PRIO,
+  vmStats, agentAvatar, clear, arr, tile, colorFor, OK, WARN, BAD, INFO, TASK_COLOR, PRIO, scrollY,
 } from "./lib.js";
 import { sparkLine, columnChart, legend, heatGrid, loadColor, fmtNum } from "./charts.js";
 import { loadMailbox, publishCount } from "./mailbox.js";
-import { openTaskPanel } from "./taskpanel.js";
+import { openTaskPanel, epicKids } from "./taskpanel.js";
 import { actCurrent, actDays } from "./activity.js";
 import { T } from "./tokens.js";
 import { relTime, hoverAction, skeleton, emptyLine } from "./ide.js";
@@ -417,14 +417,19 @@ function throughputPanel(t, X, h) {
     .child(columnChart(t, "mp-dk-thrc", cols.map((c, i) => ({ ...c, segs: [[X.created[i], "#9aa3ad33"]] })), { h, xEvery: 7, max: Math.max(...X.done, ...X.created, 1), line: { values: X.done, color: OK, fill: true } }));
 }
 // Board: a short cross-project kanban (top 4 per column, "+N more" opens that project's Tasks).
-const BOARD = [["todo", "To Do"], ["doing", "In Progress"], ["review", "Review"], ["blocked", "Blocked"]];
+// Done: only tasks finished in the last 24 h (newest first), so the column stays short.
+const BOARD = [["todo", "To Do"], ["doing", "In Progress"], ["review", "Review"], ["blocked", "Blocked"], ["done", "Done · 24h"]];
 const PRI = { urgent: 0, high: 1, normal: 2, low: 3 };
+// Cards drawn per column (the rest: "+N more" opens the project's Tasks). With 40 per column the whole
+// dashboard ran out of render time ("This view could not be re-rendered: interrupted").
+const BOARD_MAX = 5;
 function boardPanel(t, cw) {
   const seen = new Set(), by = Object.fromEntries(BOARD.map(([s]) => [s, []]));
   for (const p of S.projects) {
     if (p.loose) continue;
     for (const x of p.tasks) {
       if (!by[x.status]) continue;
+      if (x.status === "done" && Date.now() - ms(x.completed ?? x.history?.[x.history.length - 1]?.ts) > DAY) continue;
       const k = demo() ? `${x.id}\t${x.title}` : `${p.slug}\t${x.id}`;
       if (seen.has(k)) continue; seen.add(k);
       by[x.status].push({ x, p });
@@ -432,6 +437,24 @@ function boardPanel(t, cw) {
   }
   const card = ({ x, p }) => {
     const live = x.agent ? liveAgent(p, x.agent) : null;
+    if (x.kind === "epic") {
+      // An epic is a goal broken into tasks: green bar, EPIC, its tasks done / total (not a task card).
+      const kids = epicKids(p, x), done = kids.filter((y) => y.status === "done").length;
+      return h_flex().id(`mp-dk-b-${p.slug}-${x.id}`).w_full().min_w(0).rounded(T.r.ctrl).bg(t.background).border_1().border_color(`${OK}55`).overflow_hidden()
+        .cursor_pointer().hover((st) => st.border_color(OK)).on_click((_e, cx) => { openTask(p.slug, x.id)(); cx.notify(); })
+        .tooltip(`Epic #${x.id} ${x.title} · ${kids.length ? `${done}/${kids.length} tasks done` : "not planned yet"} · ${p.name}`)
+        .child(div().flex_none().w(3).h_full().bg(OK))
+        .child(v_flex().flex_1().min_w(0).px(T.sp.md).py(T.sp.sm).gap(T.sp.xs)
+          .child(h_flex().gap(T.sp.sm).items_center()
+            .child(txt(T.text.xs, OK).font_medium().flex_none().child("EPIC"))
+            .child(txt(T.text.sm, t.foreground).flex_1().min_w(0).truncate().child(x.title)))
+          .child(h_flex().gap(T.sp.sm).items_center()
+            .child(tile(p.name, { kind: "project", size: 12, color: p.color }))
+            .child(txt(T.text.xs, t.dim).flex_none().child(`#${x.id}`))
+            .child(txt(T.text.xs, t.muted).flex_none().child(kids.length ? `${done}/${kids.length} tasks` : "needs plan"))
+            .child(div().flex_1())
+            .child(agentAvatar(t, x.agent ?? "?", live, 14))));
+    }
     const [, pc] = PRIO[x.priority] ?? PRIO.normal;
     return v_flex().id(`mp-dk-b-${p.slug}-${x.id}`).w_full().min_w(0).px(T.sp.md).py(T.sp.sm).gap(T.sp.xs).rounded(T.r.ctrl).bg(t.background).border_1().border_color(t.border)
       .cursor_pointer().hover((s) => s.border_color(t.input)).on_click((_e, cx) => { openTask(p.slug, x.id)(); cx.notify(); })
@@ -446,8 +469,9 @@ function boardPanel(t, cw) {
         .child(agentAvatar(t, x.agent ?? "?", live, 14)));
   };
   const cols = BOARD.map(([s, lab]) => {
-    const items = by[s].sort((a, b) => (PRI[a.x.priority] ?? 2) - (PRI[b.x.priority] ?? 2) || ms(b.x.started ?? b.x.created) - ms(a.x.started ?? a.x.created));
-    const rest = items.slice(4);
+    const items = s === "done" ? by[s].sort((a, b) => ms(b.x.completed) - ms(a.x.completed))
+      : by[s].sort((a, b) => (PRI[a.x.priority] ?? 2) - (PRI[b.x.priority] ?? 2) || ms(b.x.started ?? b.x.created) - ms(a.x.started ?? a.x.created));
+    const rest = items.slice(BOARD_MAX);
     const top = Object.entries(rest.reduce((m, { p }) => ((m[p.slug] = (m[p.slug] ?? 0) + 1), m), {})).sort((a, b) => b[1] - a[1])[0];
     return v_flex().flex_1().min_w(0).gap(T.sp.sm)
       .child(h_flex().h(T.h.rowDense - 4).gap(T.sp.sm).items_center()
@@ -455,13 +479,15 @@ function boardPanel(t, cw) {
         .child(txt(T.text.xs, t.muted).font_medium().child(lab))
         .child(txt(T.text.xs, t.dim).child(String(items.length))))
       .when(!items.length, (e) => e.child(txt(T.text.xs, t.dim).h(T.h.rowDense).child("—")))
-      .children(items.slice(0, 4).map(card))
+      .children(items.slice(0, BOARD_MAX).map(card))
       .when(rest.length > 0, (e) => e.child(link(t, `mp-dk-bm-${s}`, `+${rest.length} more`, () => { selectProject(top[0], "tasks"); showCenter("mp-view"); })));
   });
-  const total = BOARD.reduce((n, [s]) => n + by[s].length, 0);
-  return panel(t, "mp-dk-board").flex_1()
+  const total = BOARD.reduce((n, [s]) => n + (s === "done" ? 0 : by[s].length), 0);
+  // Fixed height (the row's), the columns scroll inside; the wheel over it scrolls only the board.
+  return panel(t, "mp-dk-board").flex_1().h_full()
     .child(head(t, "Board", `${total} open across ${S.projects.filter((p) => !p.loose).length} projects`))
-    .child(cw >= 640 ? h_flex().w_full().gap(T.sp.lg).items_start().children(cols) : v_flex().w_full().gap(T.sp.lg).children(cols));
+    .child(scrollY("mp-dk-board-scroll", (cw >= 640 ? h_flex().w_full().gap(T.sp.lg).items_start().children(cols) : v_flex().w_full().gap(T.sp.lg).children(cols)).pr(T.sp.md))
+      .on_scroll_wheel((_e, cx) => cx.stop_propagation()));
 }
 function machinesPanel(t) {
   const stats = vmStats(), M = S.machines;
@@ -477,10 +503,12 @@ function machinesPanel(t) {
     .child(div().flex_none().size(T.dot).rounded_full().bg(r.st?.ok ? loadColor(Math.max(45, r.st.cpu), t) : BAD))
     .child(txt(T.text.xs, t.muted).flex_1().min_w(0).truncate().hover((s) => s.text_color(t.foreground)).child(r.m.name))
     .child(txt(T.text.xs, r.st?.ok ? (r.st.cpu >= 85 ? BAD : r.st.cpu >= 70 ? WARN : t.dim) : BAD).flex_none().child(r.st?.ok ? `CPU ${Math.round(r.st.cpu)}%` : "Offline"));
-  return v_flex().gap(T.sp.md)
+  const all = [...off, ...rows.filter((r) => r.st?.ok).sort((a, b) => b.st.cpu - a.st.cpu), ...rows.filter((r) => !r.st)];
+  return v_flex().flex_1().min_h(0).gap(T.sp.md)
     .child(head(t, "Machines", M.length ? `${online}/${M.length} online` : "none", link(t, "mp-dk-m-all", "View all", () => setShared("mp.view", { kind: "machines" }))))
     .when(M.length > 0, (e) => e.child(heatGrid(t, "mp-dk-heat", cells, { size: M.length > 60 ? 10 : 14, gap: 3 })))
-    .when(M.length > 0, (e) => e.children([...off.slice(0, 2), ...hot].slice(0, 4).map(line)))
+    // Offline first, then the busiest: the list fills the panel down to the limits and scrolls.
+    .when(M.length > 0, (e) => e.child(scrollY("mp-dk-mlist", v_flex().w_full().pr(T.sp.md).children(all.slice(0, 8).map(line))).on_scroll_wheel((_e, cx) => cx.stop_propagation())))
     .when(!M.length, (e) => e.child(txt(T.text.xs, t.dim).child("No machines yet.")));
 }
 function limits(t) {
@@ -525,16 +553,22 @@ export function dashboardView(ws, t, cx) {
   const needs = panel(t, "mp-dk-main").gap(T.sp.sm)
     // Keys come from the center view's focus handle (workspace.js onKey → dashKey).
     .child(tabs(t, G))
-    .child(list(t, G));
+    .child(wide ? scrollY("mp-dk-list", v_flex().w_full().pr(T.sp.md).child(list(t, G))).on_scroll_wheel((_e, cx) => cx.stop_propagation()) : list(t, G));
   const chartH = cw >= 1800 ? 220 : 170;
   const small = cw >= 1800 ? 140 : 110;
   const charts = v_flex().flex_1().min_w(0).gap(T.sp.lg)
     .child(activityPanel(t, X, chartH))
     .child((cw >= 760 ? h_flex() : v_flex()).w_full().gap(T.sp.lg).items_start().child(tokensPanel(t, X, small)).child(throughputPanel(t, X, small)));
-  const side = panel(t, "mp-dk-side").gap(T.sp.lg).child(machinesPanel(t)).child(div().h(1).bg(t.border)).child(limits(t));
+  const side = panel(t, "mp-dk-side").gap(T.sp.lg).child(machinesPanel(t)).child(div().flex_none().h(1).bg(t.border)).child(div().flex_none().child(limits(t)));
+  const BOARD_H = cw >= 1800 ? 560 : 460;
   const skip = Number(shared("mp.devDashSkip")) || 0; // design previews only: hide the first rows to see the rest
   return v_flex().id("mp-dk").w_full().gap(T.sp.lg)
     .when(skip < 1, (e) => e.child(tiles(t, G, X, cw)))
-    .when(skip < 2, (e) => e.child(wide ? h_flex().w_full().gap(T.sp.lg).items_start().child(needs.w(leftW).flex_none()).child(charts) : v_flex().w_full().gap(T.sp.lg).child(needs).child(charts)))
-    .child(wide ? h_flex().w_full().gap(T.sp.lg).items_start().child(boardPanel(t, cw - 340)).child(side.w(320).flex_none()) : v_flex().w_full().gap(T.sp.lg).child(boardPanel(t, cw)).child(side));
+    // Wide: the Needs-you list ends where the charts end (it is laid over its column, so only the charts set
+    // the height) and scrolls inside; the board row has a fixed height, the machines panel fills it.
+    .when(skip < 2, (e) => e.child(wide ? h_flex().w_full().gap(T.sp.lg).items_stretch()
+      .child(div().relative().w(leftW).flex_none().child(needs.absolute().top(0).bottom(0).left(0).right(0)))
+      .child(charts) : v_flex().w_full().gap(T.sp.lg).child(needs).child(charts)))
+    .child(wide ? h_flex().w_full().h(BOARD_H).gap(T.sp.lg).items_stretch().child(boardPanel(t, cw - 340)).child(side.w(320).flex_none().h_full())
+      : v_flex().w_full().gap(T.sp.lg).child(div().h(BOARD_H).child(boardPanel(t, cw))).child(side));
 }

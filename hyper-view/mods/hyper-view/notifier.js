@@ -9,7 +9,7 @@ import { notify, nextCommand } from "herdr";
 import { demo, openMailbox, showCenter, claimJob, repeat } from "./lib.js";
 import { loadMailbox, notifyOn } from "./mailbox.js";
 
-const EVERY = 10000;
+const EVERY = 30000;
 let started = false;
 let seen = null;   // Set of item ids already known (null = seed on the next run)
 let dozing = new Set(); // ids snoozed at the last check: when one comes back it is news again (Linear snooze)

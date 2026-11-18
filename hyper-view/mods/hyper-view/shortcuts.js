@@ -55,6 +55,7 @@ export const SHORTCUTS = [
     ["A  E", "Approve (dashboard) · done / edit (mailbox, clipboard)"],
     ["C", "Chat composer"],
     ["G D·M·T·S·C", "Go to Dashboard, Mailbox, Tokens, Settings, Clipboard"],
+    ["G K·I", "Go to Skills, MCP servers"],
     ["G P·V·A", "Explorer: Projects, Machines, Agents"],
     ["/", "Search"],
     ["?", "This sheet"],

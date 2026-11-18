@@ -18,6 +18,8 @@ import { openForm, accessEditor, accessArgs, switchEl, RISKS, riskOf, riskSeg } 
 import { vmView, machinesOverview } from "./vmview.js";
 import { secretsView, settingsView } from "./secrets.js";
 import { clipboardView, loadClips, changeClips } from "./clipboard.js";
+import { skillsView, mcpView, kitPanels, listPanel, searchField, loadSkills, loadMcp, changeSkills, changeMcp } from "./kit.js";
+import { typeOf, typeLabel } from "./secretkinds.js";
 import { mailboxView } from "./mailbox.js";
 import { dashboardView, dashKey } from "./dashboard.js";
 import { mapView, mapKey } from "./mapview.js";
@@ -62,6 +64,8 @@ export const hasViewSearch = (v) => v.kind === "project" && v.tab === "tasks";
 export class Workspace {
   init(cx) {
     this.taskSearchState(); // input state must be created outside render
+    this.secSearchState();
+    for (const k of ["acc", "cred", "skills", "servers", "pcred"]) this.agQ(k); // panel searches (agent page, project Credentials)
     this.project = null;
     this.events = [];
     this.machines = [];
@@ -82,7 +86,7 @@ export class Workspace {
     K(this).nav = [];
     K(this).navSel = {};
     this.focusAt = shared("mp.focus")?.at;
-    watchData(cx, (cx) => this.reload(cx), 4000, "view");
+    watchData(cx, (cx) => this.reload(cx), 30000, "view"); // folder watch reloads at once; timer = fallback
     startActivity(cx, () => this.projects); // session-log timeline + tokens per day (activity.js)
     repeat(cx, 5 * 60 * 1000, (cx) => this.loadUsage(cx, true), claimJob("view.usage"));
     // Project Activity (full view): the list's scroll handle and the pinned day header (re-render when the
@@ -117,8 +121,12 @@ export class Workspace {
         this.events = await loadEvents(v.slug);
         this.loadUsage(cx, false);
       }
-      if (v.kind !== "project") { this.secrets = await loadSecrets(); this.uses = await loadSecretUses(); }
+      this.secrets = await loadSecrets(); // also the agent page / project Credentials panels
+      if (v.kind !== "project") this.uses = await loadSecretUses();
       if (v.kind === "clipboard") this.clips = (await loadClips()).items;
+      // Skills / MCP servers: their own views and every agent page (small files).
+      this.skills = (await loadSkills()).items;
+      this.mcp = (await loadMcp()).items;
       this.loadedKey = this.key(v);
       cx.notify();
     });
@@ -149,7 +157,7 @@ export class Workspace {
       const r = await hp(positional, options);
       if (!r.ok) toast("Something went wrong", r.err, "error");
       else if (ok) toast(ok, "", "success");
-      this.reload(cx);
+      setShared("mp.reloadAt", Date.now()); // sidebar, header, status too
     });
   }
   confirmButton(t, id, label, onConfirm, opts = {}) {
@@ -163,6 +171,15 @@ export class Workspace {
     cx.spawn(async (cx) => {
       if (!(await changeClips(fn))) toast("Could not save", "The clipboard file changed; try again.", "error");
       this.clips = (await loadClips()).items;
+      cx.notify();
+    });
+  }
+  // Skills / MCP servers (kit.js): key "skills" | "servers".
+  kitChange(cx, key, fn) {
+    cx.spawn(async (cx) => {
+      if (!(await (key === "skills" ? changeSkills : changeMcp)(fn))) toast("Could not save", "The file changed; try again.", "error");
+      this.skills = (await loadSkills()).items;
+      this.mcp = (await loadMcp()).items;
       cx.notify();
     });
   }
@@ -198,6 +215,8 @@ export class Workspace {
     else if (v.kind === "secrets") body = secretsView(this, t);
     else if (v.kind === "settings") body = settingsView(this, t);
     else if (v.kind === "clipboard") body = clipboardView(this, t, openForm);
+    else if (v.kind === "skills") body = skillsView(this, t, openForm);
+    else if (v.kind === "mcp") body = mcpView(this, t, openForm);
     else if (v.kind === "mailbox") body = mailboxView(this, t, cx);
     else if (v.kind === "dashboard") body = dashboardView(this, t, cx);
     else if (v.kind === "map") body = mapView(this, t, cx);
@@ -250,7 +269,7 @@ export class Workspace {
     // Linear-style "G then a letter" (1.2 s).
     if (this.gAt && Date.now() - this.gAt < 1200) {
       this.gAt = 0;
-      const go = { d: "dashboard", m: "mailbox", t: "tokens", s: "settings", c: "clipboard", p: "focus-sidebar", v: "explorer-machines", a: "explorer-agents" }[k];
+      const go = { d: "dashboard", m: "mailbox", t: "tokens", s: "settings", c: "clipboard", k: "skills", i: "mcp", p: "focus-sidebar", v: "explorer-machines", a: "explorer-agents" }[k];
       if (go) { import("./palette.js").then((p) => p.runCommand(go)); stop(); }
       return;
     }
@@ -307,6 +326,7 @@ export class Workspace {
       case "epics": return this.epicsTab(t, p);
       case "resources": // old name (code sources + machines); sources have no UI any more
       case "machines": return this.machinesCard(t, p, true);
+      case "credentials": return this.projectCredsTab(t, p);
       case "settings": return this.settingsTab(t, p);
       default: return this.overviewTab(t, p);
     }
@@ -416,7 +436,7 @@ export class Workspace {
       .child(div().flex_1().min_w(24).child(meter(t, v, null, 5)))
       .child(div().flex_none().w(36).text_size(T.text.xs).text_color(t.muted).text_right().child(pct(v)));
     const rm = `mp-pm-rm-${n}`;
-    return h_flex().id(`mp-vm-row-${n}`).h(T.h.rowTall).px(12).gap(12).items_center().border_t_1().border_color(t.border).cursor_pointer()
+    return h_flex().id(`mp-vm-row-${n}`).flex_none().h(T.h.rowTall).px(12).gap(12).items_center().border_t_1().border_color(t.border).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_click(() => openVm(n))
       .child(div().relative().flex_none().child(tile(n, { kind: "vm", size: 22, radius: 6 }))
         .child(div().absolute().right(-2).bottom(-2).size(8).rounded_full().bg(color).border_2().border_color(t.surface)))
@@ -436,7 +456,9 @@ export class Workspace {
   }
 
   machinesCard(t, p, full) {
-    return card(t, full ? "mp-pm" : "mp-ov-vms").overflow_hidden()
+    // flex_none: inside the page's scrolling column the card must keep its full height (it used to
+    // shrink to the viewport and clip the rows below, with nothing to scroll to).
+    return card(t, full ? "mp-pm" : "mp-ov-vms").flex_none().overflow_hidden()
       .child(cardHeader(t, `Machines (${p.machines.length})`, full
         ? h_flex().gap(8)
           .child(button(t, "mp-pm-attach", "Attach Existing", () => openForm("vm-attach", { project: p.slug, attached: p.machines }), { small: true, ghost: true, iconName: "unlink" }))
@@ -487,7 +509,7 @@ export class Workspace {
     const actions = h_flex().flex_none().gap(T.sp.sm).items_center()
       .child(live
         ? this.confirmButton(t, "mp-ag-stop", "Stop", () => { markManualStop(p.slug, name); run("terminal.kill", { terminal: live.address }); }, { small: true, iconName: "square" })
-        : button(t, "mp-ag-start", "Start", () => startAgent(p, a), { small: true, primary: true, iconName: "play" }))
+        : button(t, "mp-ag-start", "Start", () => startAgent(p, a, undefined, { show: true }), { small: true, primary: true, iconName: "play" }))
       .child(button(t, "mp-ag-task", "Assign Task", () => openForm("task-add", { project: p.slug, for: name }), { small: true, ghost: true, iconName: "plus" }))
       .child(button(t, "mp-ag-chat", "Chat", () => setShared("mp.chatGo", { name, text: "", at: Date.now() }), { small: true, ghost: true, iconName: "messages" }))
       .child(iconButton(t, "mp-ag-access", "key", () => openForm("project-secrets", { project: p.slug }), "Project access (tokens it may use)", { size: T.h.btnSm }))
@@ -551,10 +573,13 @@ export class Workspace {
       .child(head)
       .child(strip)
       .child(this.agentNow(t, p, a, f))
-      .child(v_flex().w_full()
-        .child(section(t, "Machine access", { count: `${machinesN} of ${Object.keys(this.agentAccess ?? {}).length}`,
-          right: h_flex().pr(T.pad.card).gap(T.sp.md).text_size(T.text.xs).text_color(t.dim).child(div().w(52).text_center().child("Access")).child(div().w(52).text_center().child("Sudo")) }))
-        .child(this.agentAccessList(t, p, saveAccess)))
+      // Two rows of two panels, same height each (6 rows, then the list scrolls; each has its own search).
+      .child(v_flex().w_full().gap(T.sp.xl)
+        .child(h_flex().w_full().gap(T.sp.lg).items_start()
+          .child(this.agentAccessPanel(t, p, saveAccess, machinesN))
+          .child(this.agentCredsPanel(t, p, a)))
+        .child(h_flex().w_full().gap(T.sp.lg).items_start().children(kitPanels(this, t, p, a, openForm)))
+        .child(div().text_size(T.text.xs).text_color(t.dim).child("Skills and MCP servers apply the next time the agent starts.")))
       .child(this.agentRuns(t, p, name));
   }
 
@@ -602,12 +627,12 @@ export class Workspace {
     const stats = vmStats();
     if (!names.length) return card(t, "mp-ag-acc").child(emptyLine(t, "mp-ag-acc-empty", p.loose ? "No machines yet." : "This project has no machines yet.",
       p.loose ? ["Add a machine", () => openForm("vm-add", {})] : ["Attach one", () => openForm("vm-attach", { project: p.slug, attached: p.machines })]));
-    return card(t, "mp-ag-acc").overflow_hidden().py(T.sp.xs).children(names.map((n, i) => {
+    const rows = names.map((n, i) => {
       const x = acc[n];
       const m = this.machines.find((y) => y.name === n);
       const [label, color] = vmHealth(stats[n]);
       const sudoAvail = Boolean(m?.sudo);
-      return h_flex().id(`mp-ag-acc-${i}`).h(T.h.row).px(T.pad.card).gap(T.sp.md).items_center()
+      return h_flex().id(`mp-ag-acc-${i}`).flex_none().h(T.h.row).px(T.pad.card).gap(T.sp.md).items_center()
         .child(tile(n, { kind: "vm", size: 16, radius: 4 }))
         .child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).text_color(x.on ? t.foreground : t.muted).child(n))
         .child(h_flex().flex_none().w(110).gap(T.sp.sm).items_center().child(div().size(T.dot).rounded_full().bg(color)).child(div().text_size(T.text.xs).text_color(t.dim).child(label)))
@@ -615,7 +640,112 @@ export class Workspace {
           .child(switchEl(t, `mp-ag-acc-on-${i}`, x.on, (cx) => { x.on = !x.on; if (!x.on) x.sudo = false; save(cx); cx.notify(); })))
         .child(h_flex().id(`mp-ag-acc-sut-${i}`).flex_none().w(52).justify_center().tooltip(sudoAvail ? "Let this agent use sudo here" : "Sudo is off for this machine")
           .child(switchEl(t, `mp-ag-acc-su-${i}`, x.sudo, (cx) => { x.sudo = !x.sudo; if (x.sudo) x.on = true; save(cx); cx.notify(); }, !sudoAvail)));
-    }));
+    });
+    // Dozens of machines: a fixed-height scrolling list instead of a page-long one.
+    return card(t, "mp-ag-acc").overflow_hidden().py(T.sp.xs)
+      .child(names.length > 6 ? scrollY("mp-ag-acc-scroll", v_flex().max_h(T.h.row * 6).children(rows), { grow: false }) : v_flex().children(rows));
+  }
+
+  // Machine access panel: access + sudo switch per machine.
+  agentAccessPanel(t, p, save, machinesN) {
+    const acc = this.agentAccess ?? {};
+    const names = Object.keys(acc);
+    const q = this.agQv?.acc ?? "";
+    const stats = vmStats();
+    const rows = names.filter((n) => !q || q.split(/\s+/).every((w) => n.toLowerCase().includes(w))).map((n) => {
+      const x = acc[n], i = names.indexOf(n);
+      const m = this.machines.find((y) => y.name === n);
+      const [label, color] = vmHealth(stats[n]);
+      const sudoAvail = Boolean(m?.sudo);
+      return h_flex().id(`mp-ag-acc-${i}`).flex_none().h(T.h.row).px(T.pad.card).gap(T.sp.md).items_center().tooltip(`${n} · ${label}`)
+        .child(div().relative().flex_none().child(tile(n, { kind: "vm", size: 16, radius: 4 }))
+          .child(div().absolute().right(-2).bottom(-2).size(6).rounded_full().bg(color)))
+        .child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).text_color(x.on ? t.foreground : t.muted).child(n))
+        .child(h_flex().flex_none().w(44).justify_center()
+          .child(switchEl(t, `mp-ag-acc-on-${i}`, x.on, (cx) => { x.on = !x.on; if (!x.on) x.sudo = false; save(cx); cx.notify(); })))
+        .child(h_flex().id(`mp-ag-acc-sut-${i}`).flex_none().w(44).justify_center().tooltip(sudoAvail ? "Let this agent use sudo here" : "Sudo is off for this machine")
+          .child(switchEl(t, `mp-ag-acc-su-${i}`, x.sudo, (cx) => { x.sudo = !x.sudo; if (x.sudo) x.on = true; save(cx); cx.notify(); }, !sudoAvail)));
+    });
+    return listPanel(t, { id: "mp-ag-acc", title: "Machine access", count: names.length ? `${machinesN} of ${names.length}` : null,
+      right: h_flex().pr(T.pad.card).gap(0).text_size(T.text.xs).text_color(t.dim).child(div().w(44).text_center().child("Access")).child(div().w(44).text_center().child("Sudo")),
+      search: searchField(t, "mp-ag-acc-q", this.agQ("acc"), q, () => this.agQClear("acc")), rows,
+      empty: names.length ? emptyLine(t, "mp-ag-acc-none", "No matches.")
+        : emptyLine(t, "mp-ag-acc-empty", p.loose ? "No machines yet." : "This project has no machines yet.",
+          p.loose ? ["Add a machine", () => openForm("vm-add", {})] : ["Attach one", () => openForm("vm-attach", { project: p.slug, attached: p.machines })]) });
+  }
+
+  // Credentials panel: tokens / passwords this agent can use (hp checks: project shared + agent list).
+  agentCredsPanel(t, p, a) {
+    const list = (this.secrets ?? []).slice().sort((x, y) => x.name.localeCompare(y.name));
+    const q = this.agQv?.cred ?? "";
+    const hasIt = (s) => (s.projects ?? []).includes(p.slug) && (!(s.agents ?? []).length || s.agents.includes(a.name));
+    const on = list.filter(hasIt).length;
+    const rows = list.filter((s) => !q || q.split(/\s+/).every((w) => `${s.name} ${typeLabel(s)} ${s.host ?? ""} ${s.user ?? ""}`.toLowerCase().includes(w))).map((s) => {
+      const has = hasIt(s);
+      const { prov } = typeOf(s);
+      return h_flex().id(`mp-ag-cred-${s.name}`).flex_none().h(T.h.row).px(T.pad.card).gap(T.sp.md).items_center().tooltip(`${s.name} · ${typeLabel(s)}`)
+        .child(tile(s.name, { size: 16, glyph: prov.glyph, color: prov.color, radius: 4 }))
+        .child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).text_color(has ? t.foreground : t.muted).child(s.name))
+        .child(h_flex().flex_none().w(52).justify_center()
+          .child(switchEl(t, `mp-ag-cred-sw-${s.name}`, has, (cx) => this.toggleAgentSecret(cx, p, a, s, has))));
+    });
+    return listPanel(t, { id: "mp-ag-cred", title: "Credentials", count: list.length ? `${on} of ${list.length}` : null,
+      search: searchField(t, "mp-ag-cred-q", this.agQ("cred"), q, () => this.agQClear("cred")), rows,
+      empty: list.length ? emptyLine(t, "mp-ag-cred-none", "No matches.") : emptyLine(t, "mp-ag-cred-empty", "No credentials yet.", ["Add one", () => openForm("secret-add", {})]) });
+  }
+  // A secret for ONE agent: shared with its project, and when the secret has an agent list, on that list.
+  // Turning it on for one agent of a bigger project keeps the others as they were (an agent list is set);
+  // turning it off removes only this agent.
+  toggleAgentSecret(cx, p, a, s, has) {
+    cx.spawn(async (cx) => {
+      const projects = this.projects ?? [];
+      const agentsOf = (slugs) => [...new Set(projects.filter((x) => slugs.includes(x.slug)).flatMap((x) => (x.agents ?? []).map((y) => y.name)))];
+      const shared = s.projects ?? [], list = s.agents ?? [];
+      const others = (p.agents ?? []).filter((y) => y.name !== a.name).length;
+      const run1 = async (args, opts) => { const r = await hp(args, opts); if (!r.ok) throw new Error(r.err); };
+      try {
+        if (!has) {
+          const was = shared.includes(p.slug);
+          if (!was) await run1(["secret", "share", s.name], { p: p.slug });
+          if (list.length) await run1(["secret", "set", s.name], { agents: [...new Set([...list, a.name])].join(",") });
+          else if (!was && others) await run1(["secret", "set", s.name], { agents: [...new Set([...agentsOf(shared), a.name])].join(",") });
+          toast(`${a.name} can use ${s.name}`, "", "success");
+        } else {
+          if (list.length) {
+            const rest = list.filter((x) => x !== a.name);
+            if (rest.length) await run1(["secret", "set", s.name], { agents: rest.join(",") });
+            else { for (const sl of shared) await run1(["secret", "unshare", s.name], { p: sl }); await run1(["secret", "set", s.name], { agents: "" }); }
+          } else if (!others) await run1(["secret", "unshare", s.name], { p: p.slug });
+          else await run1(["secret", "set", s.name], { agents: agentsOf(shared).filter((x) => x !== a.name).join(",") });
+          toast(`${a.name} no longer uses ${s.name}`, "", "info");
+        }
+      } catch (e) { toast("Could not change access", String(e?.message ?? e), "error"); }
+      setShared("mp.reloadAt", Date.now());
+    });
+  }
+
+  // Project tab "Credentials": which tokens / passwords this project's agents may use.
+  projectCredsTab(t, p) {
+    const list = (this.secrets ?? []).slice().sort((x, y) => x.name.localeCompare(y.name));
+    const q = this.agQv?.pcred ?? "";
+    const on = list.filter((s) => (s.projects ?? []).includes(p.slug)).length;
+    const rows = list.filter((s) => !q || q.split(/\s+/).every((w) => `${s.name} ${typeLabel(s)} ${s.host ?? ""} ${s.url ?? ""} ${s.user ?? ""} ${s.desc ?? ""}`.toLowerCase().includes(w))).map((s) => {
+      const has = (s.projects ?? []).includes(p.slug);
+      const { prov } = typeOf(s);
+      const where = [String(s.host || s.url || "").replace(/^https?:\/\//, ""), s.user].filter(Boolean).join(" · ");
+      const only = has && (s.agents ?? []).length ? `only ${s.agents.join(", ")}` : "";
+      return h_flex().id(`mp-pc-${s.name}`).flex_none().h(T.h.row).px(T.pad.card).gap(T.sp.md).items_center()
+        .child(tile(s.name, { size: 16, glyph: prov.glyph, color: prov.color, radius: 4 }))
+        .child(div().flex_none().w(260).truncate().text_size(T.text.sm).text_color(has ? t.foreground : t.muted).child(s.name))
+        .child(div().flex_none().w(200).truncate().text_size(T.text.xs).text_color(t.dim).child(typeLabel(s)))
+        .child(div().flex_1().min_w(0).truncate().text_size(T.text.xs).text_color(t.muted).child(only || where))
+        .child(h_flex().flex_none().w(52).justify_center()
+          .child(switchEl(t, `mp-pc-sw-${s.name}`, has, (cx) => this.act(cx, ["secret", has ? "unshare" : "share", s.name], { p: p.slug }, has ? `${s.name} removed from ${p.name}` : `${s.name} shared with ${p.name}`))));
+    });
+    return listPanel(t, { id: "mp-pc", title: "Credentials the agents of this project may use", count: list.length ? `${on} of ${list.length}` : null,
+      right: h_flex().gap(T.sp.md).items_center().child(button(t, "mp-pc-add", "Add credential", () => openForm("secret-add", { project: p.slug }), { small: true, ghost: true, iconName: "plus" })),
+      search: searchField(t, "mp-pc-q", this.agQ("pcred"), q, () => this.agQClear("pcred")), rows, rowsVisible: 14,
+      empty: list.length ? emptyLine(t, "mp-pc-none", "No matches.") : emptyLine(t, "mp-pc-empty", "No credentials yet.", ["Add one", () => openForm("secret-add", { project: p.slug })]) });
   }
 
   // Recent activity: the agent's last 5 runs; "All runs" opens the project's Activity filtered to it.
@@ -711,6 +841,25 @@ export class Workspace {
 
   // Tasks scale to hundreds: filters (agent, search, quick) narrow the list; columns and lanes show
   // a capped number of cards with "Show more"; the board turns compact (one line per card) when busy.
+  // Search fields of the list panels (kit.js listPanel): created once, outside render.
+  agQ(key) {
+    this.agQs ??= {}; this.agQv ??= {};
+    if (!this.agQs[key]) {
+      const st = InputState.new({ placeholder: "Search" });
+      st.on("change", (_e, cx) => { this.agQv[key] = st.value().trim().toLowerCase(); cx.notify(); });
+      this.agQs[key] = st;
+    }
+    return this.agQs[key];
+  }
+  agQClear(key) { this.agQs?.[key]?.set_value(""); if (this.agQv) this.agQv[key] = ""; }
+  // Tokens & Access search (secrets.js).
+  secSearchState() {
+    if (!this.secSearch) {
+      this.secSearch = InputState.new({ placeholder: "Search tokens, passwords, hosts, projects" });
+      this.secSearch.on("change", (_e, cx) => { this.secQ = this.secSearch.value().trim().toLowerCase(); cx.notify(); });
+    }
+    return this.secSearch;
+  }
   taskSearchState() {
     if (!this.taskSearch) {
       this.taskSearch = InputState.new({ placeholder: "Search tasks or #id" });
@@ -932,45 +1081,80 @@ export class Workspace {
     const byPrio = (a, b) => (PRI[a.priority] ?? 2) - (PRI[b.priority] ?? 2) || Number(a.id) - Number(b.id);
     const byDone = (a, b) => String(b.completed ?? "").localeCompare(String(a.completed ?? ""));
 
-    // By agent: one collapsible card per agent (most open tasks first), its tasks as lines.
+    // By agent: a swimlane kanban. Column headers on top (To Do · In Progress · Review · Blocked · Done), one lane
+    // per agent (most open tasks first, collapsible): the agent on the left, its tasks as small cards in the
+    // status columns. Backlog sits in To Do (dimmed); Done shows the latest few. 4 cards per cell, then "+N".
     if (this.taskMode === "agents") {
-      const order = ["doing", "review", "blocked", "todo", "backlog", "done"];
+      const LCOLS = ["todo", "doing", "review", "blocked", "done"];
       const groups = new Map();
       for (const x of cardList) { const k = x.agent ?? ""; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(x); }
       const shown = (this.taskFilter ? [this.taskFilter] : names).filter((n) => !filtered || groups.has(n))
         .sort((a, b) => (openOf.get(b) ?? 0) - (openOf.get(a) ?? 0));
-      const OPEN_CAP = 12;
+      const GAP = T.sp.md, LANE_W = 190, CELL_CAP = 4;
+      const avail = Math.max(480, Math.floor(this.width) - 2 * T.sp.xxl - 2);
+      const cellW = Math.max(150, Math.floor((avail - LANE_W - GAP * LCOLS.length - 2 * 12) / LCOLS.length));
+      const cellOf = (x) => (x.status === "backlog" ? "todo" : LCOLS.includes(x.status) ? x.status : "todo");
+      const laneCard = (x) => {
+        const [, pcolor] = PRIO[x.priority] ?? PRIO.normal;
+        const sel = taskPanelOpen(p.slug, x.id);
+        const waits = this.waitsOf(p, x, byId);
+        return v_flex().id(`mp-lc-${x.id}`).w_full().min_w(0).px(8).py(6).gap(4).rounded(T.r.ctrl).bg(t.background).border_1()
+          .border_color(sel ? t.accent : t.border).cursor_pointer().hover((st) => st.border_color(sel ? t.accent : t.input))
+          .when(x.status === "backlog" || x.status === "done", (el) => el.opacity(0.7))
+          .tooltip(`#${x.id} ${x.title}${waits.length ? " · waits for " + waits.map((d) => "#" + d).join(", ") : ""}${x.status === "blocked" && x.blocked_reason ? " · " + x.blocked_reason : ""}`)
+          .on_click(() => openTaskPanel(p.slug, x.id))
+          .child(div().w_full().min_w(0).text_size(T.text.sm).line_height(`${T.lh.sm}px`).h(T.lh.sm * 2).overflow_hidden().whitespace_normal()
+            .text_color(x.status === "done" ? t.muted : t.foreground).child(x.title))
+          .child(h_flex().gap(6).items_center()
+            .child(div().flex_none().text_size(T.text.xs).text_color(t.dim).child(`#${x.id}`))
+            .when(x.priority === "urgent" || x.priority === "high", (el) => el.child(div().flex_none().size(T.dot).rounded_full().bg(pcolor)))
+            .when(x.status === "backlog", (el) => el.child(div().flex_none().text_size(T.text.xs).text_color(t.dim).child("backlog")))
+            .when(waits.length > 0, (el) => el.child(iconEl("clock", WARN, 11)))
+            .child(div().flex_1())
+            .when(x.status === "doing", (el) => el.child(div().flex_none().text_size(T.text.xs).text_color(t.muted).child(`${x.progress ?? 0}%`))))
+          .when(x.status === "doing", (el) => el.child(div().h(3).w_full().rounded_full().bg(t.hover).overflow_hidden()
+            .child(div().h_full().w(`${Math.max(0, Math.min(100, x.progress ?? 0))}%`).rounded_full().bg(TASK_COLOR.doing))));
+      };
+      const header = h_flex().gap(GAP).px(12).items_center()
+        .child(div().flex_none().w(LANE_W).text_size(T.text.xs).text_color(t.dim).child(`${shown.length} agent${shown.length === 1 ? "" : "s"}`))
+        .children(LCOLS.map((s) => h_flex().flex_none().w(cellW).h(T.h.rowDense).gap(T.sp.sm).items_center().border_b_1().border_color(t.border)
+          .child(div().flex_none().size(T.dot).rounded_full().bg(TASK_COLOR[s]))
+          .child(div().text_size(T.text.xs).font_medium().text_color(t.muted).child(s === "todo" ? "To Do" : TASK_EN[s]))
+          .child(div().text_size(T.text.xs).text_color(t.dim).child(String(cardList.filter((x) => cellOf(x) === s).length)))));
+      const lane = (n) => {
+        const mine = groups.get(n) ?? [];
+        const live = liveAgent(p, n);
+        const isOpen = this.laneOpen[n] ?? true;
+        const cells = Object.fromEntries(LCOLS.map((s) => [s, []]));
+        for (const x of mine) cells[cellOf(x)].push(x);
+        for (const s of LCOLS) cells[s].sort(s === "done" ? byDone : (a, b) => (a.status === "backlog") - (b.status === "backlog") || byPrio(a, b));
+        const openN = openOf.get(n) ?? 0, doneN = cells.done.length;
+        return v_flex().id(`mp-tlane-${n}`).w_full().rounded(T.r.panel).bg(t.surface).border_1().border_color(t.border)
+          .child(h_flex().w_full().px(12).py(10).gap(GAP).items_start()
+            // Lane label: avatar, name, live status, counts; click folds the lane.
+            .child(h_flex().id(`mp-tlane-h-${n}`).flex_none().w(LANE_W).gap(10).items_center().cursor_pointer()
+              .on_click((_e, cx) => { this.laneOpen[n] = !isOpen; cx.notify(); })
+              .child(iconEl(isOpen ? "chevron-down" : "chevron-right", t.dim, 12))
+              .child(agentAvatar(t, n, live, 26))
+              .child(v_flex().flex_1().min_w(0)
+                .child(div().text_size(T.text.sm).font_semibold().truncate().child(n))
+                .child(div().text_size(T.text.xs).text_color(live ? statusColor(t, live.status) : t.dim).truncate().child(live ? STATUS_EN[live.status] ?? live.status : "Stopped"))
+                .child(div().text_size(T.text.xs).text_color(t.dim).child(`${openN} open · ${doneN} done`))))
+            .children(LCOLS.map((s) => {
+              const items = cells[s];
+              const key = `lane-${n}-${s}`;
+              const cap = this.colShow[key] ?? CELL_CAP;
+              return v_flex().flex_none().w(cellW).min_w(0).gap(6)
+                .when(!isOpen, (el) => el.child(div().h(T.h.rowDense).text_size(T.text.xs).text_color(items.length ? t.muted : t.dim).child(items.length ? String(items.length) : "—")))
+                .when(isOpen && !items.length, (el) => el.child(div().h(T.h.rowDense).text_size(T.text.xs).text_color(t.dim).child("—")))
+                .when(isOpen, (el) => el.children(items.slice(0, cap).map((x) => this.navMark(laneCard(x), { key: `t:${x.id}`, open: () => openTaskPanel(p.slug, x.id), ref: { kind: "task", slug: p.slug, id: x.id } }, true))))
+                .when(isOpen && items.length > cap, (el) => el.child(more(`mp-lm-${n}-${s}`, `+${items.length - cap} more`, () => { this.colShow[key] = cap + 20; })));
+            })));
+      };
       return v_flex().gap(8).child(toolbar).when(Boolean(note), (el) => el.child(note))
         .when(Boolean(epicsEl), (el) => el.child(epicsEl))
         .when(shown.length === 0, (el) => el.child(empty(t, "No tasks match.")))
-        .children(shown.map((n) => {
-          const mine = groups.get(n) ?? [];
-          const live = liveAgent(p, n);
-          const openN = openOf.get(n) ?? 0;
-          const doneN = p.tasks.filter((x) => x.agent === n && x.status === "done" && !isEpic(x)).length;
-          // Open by default when filtered, with few agents, or for the 3 busiest.
-          const isOpen = this.laneOpen[n] ?? (filtered || shown.length <= 4 || shown.indexOf(n) < 3);
-          const act = order.slice(0, 5).flatMap((s) => mine.filter((x) => x.status === s).sort(byPrio));
-          const done = mine.filter((x) => x.status === "done").sort(byDone);
-          const all = this.colShow[`lane-${n}`];
-          const lines = [...(all ? act : act.slice(0, OPEN_CAP)), ...done.slice(0, all ? 50 : filtered ? 10 : 3)];
-          const hidden = act.length + Math.min(done.length, 50) - lines.length;
-          const busy = mine.filter((x) => x.status === "doing").length, blocked = mine.filter((x) => x.status === "blocked").length;
-          return card(t, `mp-tlane-${n}`)
-            .child(h_flex().id(`mp-tlane-h-${n}`).px(12).py(12).gap(12).items_center().cursor_pointer().rounded(T.r.panel).hover((s) => s.bg(t.hover))
-              .on_click((_e, cx) => { this.laneOpen[n] = !isOpen; cx.notify(); })
-              .child(iconEl(isOpen ? "chevron-down" : "chevron-right", t.dim, 14))
-              .child(agentAvatar(t, n, live, 28))
-              .child(v_flex().flex_1().min_w(0).child(div().text_size(T.text.base).font_semibold().truncate().child(n))
-                .child(div().text_size(T.text.xs).text_color(live ? statusColor(t, live.status) : t.dim).child(live ? STATUS_EN[live.status] ?? live.status : "Stopped")))
-              .when(blocked > 0, (el) => el.child(pill(t, `${blocked} blocked`, BAD)))
-              .when(busy > 0, (el) => el.child(pill(t, `${busy} in progress`, WARN)))
-              .child(div().flex_none().text_size(T.text.xs).text_color(t.muted).child(`${openN} open · ${doneN} done`)))
-            .when(isOpen, (el) => el.child(v_flex().px(8).pb(8)
-              .when(lines.length === 0, (el) => el.child(empty(t, filtered ? "No matching tasks." : "No tasks yet.")))
-              .children(lines.map((x) => this.taskLine(t, x)))
-              .when(hidden > 0 || Boolean(all), (el) => el.child(more(`mp-tlane-more-${n}`, all ? "Show less" : `Show ${hidden} more`, () => { this.colShow[`lane-${n}`] = !all; })))));
-        }));
+        .when(shown.length > 0, (el) => el.child(header).children(shown.map(lane)));
     }
     // Board: six columns in one row when each gets >= 200 px, else two rows of three (Backlog · To Do ·
     // In Progress, then Review · Blocked · Done). Equal widths fill the view: no sideways scroll, nothing

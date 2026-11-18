@@ -125,7 +125,7 @@ async function agentActions({ slug, name }) {
       { id: "task", title: "Assign task", icon: "plus", go: () => openForm("task-add", { project: slug, for: name }) },
       live
         ? { id: "stop", title: "Stop", icon: "square", danger: true, go: () => import("./supervisor.js").then((m) => { m.markManualStop(slug, name); run("terminal.kill", { terminal: live.address }); }) }
-        : { id: "start", title: "Start", icon: "play", go: () => startAgent(p, a) },
+        : { id: "start", title: "Start", icon: "play", go: () => startAgent(p, a, undefined, { show: true }) },
       ...(live ? [{ id: "term", title: "Jump to terminal", icon: "terminal", go: () => { run("agent.focus", { terminal: live.address }); showCenter("mp-terms"); } }] : []),
       { id: "risk", title: "Risk level", icon: "shield", sub: RISKS.find((r) => r[0] === risk)?.[1] ?? risk, children: async () => ({
         title: "Risk level",

@@ -6,16 +6,19 @@ import { h_flex, v_flex, InputState, Input, TextareaState, Textarea, Popover } f
 import { props, theme, openOverlay, closeOverlay, notify, setShared, shared, readTextFile } from "herdr";
 import { TEAMS, COMMON_PROMPT, loadCustomTeams, changeCustomTeams } from "./teams.js";
 import { IMPORT_PH, IMPORT_EXAMPLE, parseMachines, pickFile, slugify } from "./vmimport.js";
-import { copyText } from "./clipboard.js";
+import { copyText, changeClips } from "./clipboard.js";
 import { SecretWizard } from "./secretwizard.js";
+import { agentChoices, pairsToText, saveSkill, saveServer } from "./kit.js";
 import { kbd } from "./ide.js";
 import {
   scrollY, MOD, demo, rememberFocus, leadOf, OK, WARN, BAD, hp, hpCmd, installKey, looseSlug, loadSecrets, selectProject, openVm, loadProject, loadMachines, listProjects, startAgent, showCenter, button, toast, iconEl, clear, tile, grid,
 } from "./lib.js";
 
+// Dialogs with long lists (machines, tokens, agents): fixed height, the fields scroll, buttons stay put.
+const TALL = new Set(["agent-new", "loose-agent", "skill-edit", "mcp-edit"]);
 export function openForm(kind, extra = {}) {
   if (!extra?.tour) rememberFocus(`form:${kind}`); // focus goes back to this zone when the dialog closes (lib.js focus manager)
-  openOverlay({ mod: MOD, props: { role: "form", kind, ...extra }, kind: "dialog", ...(kind === "agent-new" ? { height: 0.88 } : {}), width: kind === "agent-new" || kind === "loose-agent" || kind === "vm-import" ? 680 : kind === "message" || kind === "snippet" || kind === "secret-add" ? 640 : kind === "task-add" ? 520 : 480, modal: true });
+  openOverlay({ mod: MOD, props: { role: "form", kind, ...extra }, kind: "dialog", ...(TALL.has(kind) ? { height: 0.88 } : {}), width: kind === "agent-new" || kind === "loose-agent" || kind === "vm-import" ? 680 : kind === "message" || kind === "snippet" || kind === "secret-add" || kind === "skill-edit" || kind === "mcp-edit" ? 640 : kind === "task-add" ? 520 : 480, modal: true });
 }
 
 // Field: { key, label, ph?, value?, type: text|masked|textarea|choice|multi, choices?, optional?, show?(values) }
@@ -80,12 +83,12 @@ function spec(p, data) {
       title: `Sudo · ${p.machine}`, submit: "Save", icon: "shield",
       fields: [
         { key: "user", label: "User", value: p.user ?? "" },
-        { key: "password", label: "Password", type: "masked" },
+        { key: "password", label: "Password", ph: "Loading…" },
       ],
     };
     case "vm-password": return {
       title: `SSH Password · ${p.machine}`, submit: "Save", icon: "key",
-      fields: [{ key: "password", label: "Password", type: "masked" }],
+      fields: [{ key: "password", label: "Password", ph: "Loading…" }],
     };
     case "vm-attach": {
       const free = machines.filter(([n]) => !(p.attached ?? []).includes(n));
@@ -190,6 +193,40 @@ function spec(p, data) {
         ],
       };
     }
+    // Skills and MCP servers (kit.js): attached to any agent, project or loose.
+    case "skill-edit": {
+      const e = p.edit;
+      return {
+        title: e ? `Edit Skill · ${e.name}` : "New Skill", submit: "Save", icon: "puzzle",
+        fields: [
+          { key: "name", label: "Name", value: e?.name ?? "", ph: "deploy-checklist", optional: true },
+          { key: "desc", label: "Description: when should the agent use it?", value: e?.desc ?? "", ph: "Use when deploying to staging or production", optional: true },
+          { key: "body", label: "Prompt", type: "textarea", rows: 14, value: e?.body ?? "", ph: "Steps, rules, checklists the agent follows…" },
+          { key: "agents", label: "Attached to agents", type: "multi", optional: true, value: e?.agents ?? [], choices: agentChoices(data.projects) },
+        ],
+      };
+    }
+    case "mcp-edit": {
+      const e = p.edit, x = p.tpl ?? {};
+      const stdio = (v) => v.transport !== "http", http = (v) => v.transport === "http";
+      return {
+        title: e ? `Edit MCP Server · ${e.name}` : x.title && !String(x.id).startsWith("custom") ? `Add ${x.title}` : "New MCP Server", submit: "Save", icon: "plug",
+        fields: [
+          { key: "name", label: "Name (the agent sees its tools as this)", value: e?.name ?? x.name ?? "", ph: "my-server" },
+          { key: "desc", label: "Description", optional: true, value: e?.desc ?? x.desc ?? "", ph: "What it gives the agent" },
+          { key: "transport", label: "Type", type: "seg", value: e?.transport ?? x.transport ?? "stdio", choices: [["stdio", "Local program (stdio)"], ["http", "Remote (HTTP)"]] },
+          { key: "command", label: "Command", value: e?.command ?? x.command ?? "", ph: "npx", show: stdio },
+          { key: "args", label: "Arguments, one per line", type: "textarea", rows: 3, optional: true, value: e ? (e.args ?? []).join("\n") : x.args ?? "", ph: "-y\n@scope/server", show: stdio },
+          { key: "env", label: "Environment, KEY=value per line (${secret:NAME} = a token)", type: "textarea", rows: 3, optional: true, value: e ? pairsToText(e.env, "=") : x.env ?? "", ph: "API_KEY=${secret}", show: stdio },
+          { key: "cwd", label: "Working folder", optional: true, value: e?.cwd ?? "", ph: "C:\\code\\repo", show: stdio },
+          { key: "url", label: "URL", value: e?.url ?? x.url ?? "", ph: "https://example.com/mcp", show: http },
+          { key: "headers", label: "Headers, Name: value per line (${secret:NAME} = a token)", type: "textarea", rows: 2, optional: true, value: e ? pairsToText(e.headers, ": ") : x.headers ?? "", ph: "Authorization: Bearer ${secret}", show: http },
+          { key: "secret", label: x.secret ? "Token from Tokens & Access (fills ${secret})" : "Token for ${secret} (optional)", type: "choice", optional: true, value: "",
+            choices: [["", x.secret === true ? "Pick one" : "None"], ...(data.secrets ?? []).map((y) => [y.name, y.name])] },
+          { key: "agents", label: "Attached to agents", type: "multi", optional: true, value: e?.agents ?? [], choices: agentChoices(data.projects) },
+        ],
+      };
+    }
     default: return { title: p.kind, submit: "OK", fields: [] };
   }
 }
@@ -211,6 +248,16 @@ export class Form {
     this.teamPick(TEAMS[0].id);
     cx.spawn(async (cx) => { this.customTeams = (await loadCustomTeams()).teams; cx.notify(); });
     this.build(cx);
+    // Machine passwords: the saved one is shown (plain text) so you can see / change it.
+    if ((this.p.kind === "vm-password" || this.p.kind === "vm-sudo") && this.p.machine && !this.p.tour) {
+      cx.spawn(async (cx) => {
+        const r = await hp(["vm", "getpass", this.p.machine], { which: this.p.kind === "vm-sudo" ? "sudo" : "ssh" });
+        const st = this.inputs.password;
+        if (r.ok && st && !String(this.values.password ?? "")) { st.set_value(r.out); this.values.password = r.out; }
+        else if (st && !r.ok) { try { st.set_placeholder?.("Not saved yet"); } catch {} }
+        cx.notify();
+      });
+    }
     cx.spawn(async (cx) => {
       this.data.machines = await loadMachines();
       this.data.projects = await listProjects();
@@ -233,6 +280,7 @@ export class Form {
     let first = null;
     for (const f of this.spec.fields) {
       const type = f.type ?? "text";
+      if (type === "multi" || type === "access") this.filterState(f.key);
       if (["choice", "multi", "seg", "team", "access", "switch", "import"].includes(type)) { this.values[f.key] = f.value; continue; }
       this.values[f.key] = f.value ?? "";
       const st = type === "textarea"
@@ -249,6 +297,25 @@ export class Form {
   }
 
   close() { closeOverlay(this.p.overlay); }
+
+  // Search field of a long list (multi / machine access). Created outside render.
+  filterState(key) {
+    this.filters ??= {}; this.filterQ ??= {};
+    if (!this.filters[key]) {
+      const st = InputState.new({ placeholder: "Search" });
+      st.on("change", (_e, cx) => { this.filterQ[key] = st.value().trim().toLowerCase(); cx.notify(); });
+      this.filters[key] = st;
+    }
+    return this.filters[key];
+  }
+  searchBox(t, key) {
+    const q = this.filterQ?.[key] ?? "";
+    return h_flex().id(`mp-f-q-${key}`).flex_1().h(T.h.btnSm).px(8).gap(6).items_center().rounded(T.r.ctrl).bg(t.background).border_1().border_color(q ? t.accent : t.input)
+      .child(iconEl("search", t.dim, 12))
+      .child(Input.new(this.filterState(key)).flex_1().h(24).text_size(T.text.sm).text_color(t.foreground))
+      .when(Boolean(q), (el) => el.child(div().id(`mp-f-qx-${key}`).cursor_pointer().text_size(T.text.xs).text_color(t.dim).hover((s) => s.text_color(t.foreground))
+        .on_click((_e, cx) => { this.filters[key].set_value(""); this.filterQ[key] = ""; cx.notify(); }).child("Clear")));
+  }
 
   // Team mode: an editable copy of a template (built-in or your own): names, roles,
   // engine per agent, who is included. Rows can be added and the result saved as a team.
@@ -354,6 +421,9 @@ export class Form {
       const err = await this.save();
       this.busy = false;
       if (err) { this.error = err; cx.notify(); return; }
+      // Show the result everywhere at once (and once more when a started agent has registered).
+      setShared("mp.reloadAt", Date.now());
+      cx.timer.after(3000, () => setShared("mp.reloadAt", Date.now()));
       this.close();
     });
   }
@@ -503,7 +573,10 @@ export class Form {
       }
       case "vm-password": {
         const r = await hp(["vm", "password", p.machine], { value: v.password });
-        return r.ok ? null : r.err;
+        if (!r.ok) return r.err;
+        toast(`SSH password saved for ${p.machine}`, "Checking the connection now. Install SSH Key uses it, no typing.", "success");
+        setShared("mp.vmProbeAsk", { vm: p.machine, at: Date.now() });
+        return null;
       }
       case "vm-attach": {
         for (const m of v.machines ?? []) {
@@ -555,6 +628,42 @@ export class Form {
         startAgent(project, { name: r.out.split(/\r?\n/).pop().trim(), role: s("role"), app: v.app, risk: v.risk ?? "balanced" }, s("goal"));
         showCenter("mp-terms");
         return null;
+      }
+      // Loose agent = a project of its own (hp project new --loose yes) with one agent in it.
+      case "loose-agent": {
+        const name = s("name");
+        const acc = Object.entries(this.access ?? {});
+        const on = acc.filter(([, a]) => a.on).map(([n]) => n), sudo = acc.filter(([, a]) => a.on && a.sudo).map(([n]) => n);
+        const r = await hp(["project", "new", name], { loose: "yes", machines: on.length ? on.join(",") : undefined });
+        if (!r.ok) return r.err;
+        const ls = r.out.split(/\r?\n/).pop().trim();
+        const j = await hp(["agent", "join", name], { p: ls, role: s("role") || undefined, app: v.app ?? "claude", risk: "balanced", sudo: sudo.length ? sudo.join(",") : undefined });
+        if (!j.ok) return j.err;
+        const real = j.out.split(/\r?\n/).pop().trim() || name;
+        for (const c of v.creds ?? []) await hp(["secret", "share", c], { p: ls });
+        toast(`Agent ${real} created`, "Write to it in the chat to start it.", "success");
+        import("./toolbar.js").then((m) => { m.openAgentPage(ls, real, "agents"); showCenter("mp-view"); }).catch(() => {});
+        return null;
+      }
+      case "project-secrets": {
+        const want = new Set(v.creds ?? []);
+        for (const x of this.data.secrets ?? []) {
+          const has = (x.projects ?? []).includes(p.project);
+          const r = want.has(x.name) && !has ? await hp(["secret", "share", x.name], { p: p.project })
+            : !want.has(x.name) && has ? await hp(["secret", "unshare", x.name], { p: p.project }) : { ok: true };
+          if (!r.ok) return r.err;
+        }
+        return null;
+      }
+      case "skill-edit": return saveSkill(p.edit, { name: s("name"), desc: s("desc"), body: String(v.body ?? "") }, v.agents ?? []);
+      case "mcp-edit": return saveServer(p.edit, { name: s("name"), desc: s("desc"), transport: v.transport ?? "stdio", command: s("command"), args: String(v.args ?? ""),
+        env: String(v.env ?? ""), cwd: s("cwd"), url: s("url"), headers: String(v.headers ?? ""), secret: v.secret ?? "" }, v.agents ?? [], p.tpl?.secret === "optional" || !p.tpl?.secret);
+      // Clipboard (clipboard.js): add / edit a snippet.
+      case "snippet": {
+        const item = { id: p.edit?.id ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, kind: v.kind ?? "note", title: s("title"), text: String(v.text ?? ""),
+          pinned: p.edit?.pinned ?? false, updated: new Date().toISOString() };
+        const ok = await changeClips((all) => (p.edit ? all.map((x) => (x.id === p.edit.id ? item : x)) : [item, ...all]));
+        return ok ? null : "Could not save (the clipboard file changed); try again.";
       }
       case "message": {
         const r = await hp(["say", s("text")], { p: slug, as: "ty", to: v.to, task: p.task ? String(p.task) : undefined });
@@ -667,7 +776,8 @@ export class Form {
       }
       if (type === "import") return this.importPanel(t);
       if (type === "access") {
-        return v_flex().child(label(f)).child(accessEditor(t, this.access ?? {}, this.data.machines, "mp-f-acc"));
+        return v_flex().child(label(f)).child(accessEditor(t, this.access ?? {}, this.data.machines, "mp-f-acc", null,
+          { q: this.filterQ?.[f.key] ?? "", search: Object.keys(this.access ?? {}).length > 8 ? this.searchBox(t, f.key) : null }));
       }
       if (type === "switch") {
         const on = Boolean(this.values[f.key]);
@@ -685,12 +795,35 @@ export class Form {
         control = h_flex().flex_wrap().gap(6).children(f.choices.map(([val, text]) => chip(f, val, text, this.values[f.key] === val, () => { this.values[f.key] = val; })));
       } else if (type === "multi") {
         const set = new Set(this.values[f.key] ?? []);
-        control = f.choices.length
-          ? h_flex().flex_wrap().gap(6).children(f.choices.map(([val, text]) => chip(f, val, text, set.has(val), () => {
-            if (set.has(val)) set.delete(val); else set.add(val);
-            this.values[f.key] = [...set];
-          }, true)))
-          : div().text_size(T.text.xs).text_color(t.dim).child("None available");
+        const chips = h_flex().flex_wrap().gap(6).pr(T.sp.md).children(f.choices.map(([val, text]) => chip(f, val, text, set.has(val), () => {
+          if (set.has(val)) set.delete(val); else set.add(val);
+          this.values[f.key] = [...set];
+        }, true)));
+        // Many choices (machines, tokens, agents): search + a fixed-height scrolling list of rows with
+        // a count and All / None (on what the search shows), so the dialog keeps its buttons on screen.
+        const many = f.choices.length > 8;
+        const q = this.filterQ?.[f.key] ?? "";
+        const shown = q ? f.choices.filter(([val, text]) => `${text} ${val}`.toLowerCase().includes(q)) : f.choices;
+        const link = (id, text, fn) => div().id(id).flex_none().cursor_pointer().text_size(T.text.xs).text_color(t.accent)
+          .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { fn(); cx.notify(); }).child(text);
+        const row = ([val, text], i) => {
+          const on = set.has(val);
+          return h_flex().id(`mp-f-mr-${f.key}-${i}`).flex_none().h(28).px(T.sp.md).gap(T.sp.md).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => { if (on) set.delete(val); else set.add(val); this.values[f.key] = [...set]; cx.notify(); })
+            .child(h_flex().flex_none().size(14).rounded(3).items_center().justify_center().border_1().border_color(on ? t.accent : t.input).bg(on ? t.accent : clear)
+              .when(on, (el) => el.child(iconEl("check", t.accent_foreground ?? "#ffffff", 10))))
+            .child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).text_color(on ? t.foreground : t.muted).child(text));
+        };
+        control = !f.choices.length ? div().text_size(T.text.xs).text_color(t.dim).child("None available")
+          : !many ? chips
+          : v_flex().rounded(T.r.panel).border_1().border_color(t.border).overflow_hidden()
+            .child(h_flex().flex_none().p(T.sp.sm).gap(T.sp.md).items_center().bg(t.raised)
+              .child(this.searchBox(t, f.key))
+              .child(div().flex_none().text_size(T.text.xs).text_color(t.dim).child(`${set.size} of ${f.choices.length}`))
+              .child(link(`mp-f-all-${f.key}`, "All", () => { for (const [v] of shown) set.add(v); this.values[f.key] = [...set]; }))
+              .child(link(`mp-f-none-${f.key}`, "None", () => { for (const [v] of shown) set.delete(v); this.values[f.key] = [...set]; })))
+            .child(shown.length ? scrollY(`mp-f-multi-${f.key}`, v_flex().max_h(28 * 8).children(shown.map(row)), { grow: false })
+              : h_flex().h(28).px(T.sp.md).items_center().text_size(T.text.sm).text_color(t.dim).child("No matches"));
       } else {
         const focused = this.focusedKey === f.key;
         const el = type === "textarea" ? Textarea.new(this.inputs[f.key]) : Input.new(this.inputs[f.key]);
@@ -700,7 +833,7 @@ export class Form {
       return v_flex().child(label(f)).child(control);
     };
     // Header and buttons stay put; only the fields scroll when the dialog is tall.
-    const tall = this.p.kind === "agent-new";
+    const tall = TALL.has(this.p.kind);
     const compact = this.p.kind === "task-add";
     const fixedFor = compact && this.p.for ? this.p.for : null;
     return v_flex().id("mp-form").track_focus(this.handle)
@@ -772,21 +905,32 @@ export function switchEl(t, id, on, onToggle, disabled) {
     .on_click((_e, cx) => { if (!disabled) onToggle(cx); })
     .child(div().size(16).rounded_full().bg(on ? t.accent_foreground : t.surface).when(on, (el) => el.ml(12)));
 }
-export function accessEditor(t, access, machines, idp, onChange) {
+export function accessEditor(t, access, machines, idp, onChange, { q = "", search = null } = {}) {
   const names = Object.keys(access);
   if (!names.length) return div().text_size(T.text.xs).text_color(t.dim).child("This project has no machines yet.");
-  return v_flex().rounded(T.r.panel).border_1().border_color(t.border).overflow_hidden()
-    .child(h_flex().h(28).px(12).gap(8).items_center().bg(t.raised).text_size(T.text.xs).text_color(t.dim)
-      .child(div().flex_1().child("Machine")).child(div().w(46).flex_none().child("Access")).child(div().w(36).flex_none().child("Sudo")))
-    .children(names.map((n, i) => {
+  const on = names.filter((n) => access[n].on).length;
+  const shown = q ? names.filter((n) => n.toLowerCase().includes(q)) : names;
+  const setAll = (v, cx) => { for (const n of shown) { access[n].on = v; if (!v) access[n].sudo = false; } onChange?.(cx); cx.notify(); };
+  const link = (id, text, v) => div().id(id).cursor_pointer().text_size(T.text.xs).text_color(t.accent).hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => setAll(v, cx)).child(text);
+  const rows = shown.map((n) => {
+    const i = names.indexOf(n);
       const a = access[n];
       const m = (machines ?? []).find((x) => x.name === n);
       const sudoAvail = Boolean(m?.sudo);
-      return h_flex().id(`${idp}-${i}`).h(36).px(12).gap(8).items_center().border_t_1().border_color(t.border).tooltip(n)
+      return h_flex().id(`${idp}-${i}`).flex_none().h(36).px(12).gap(8).items_center().border_t_1().border_color(t.border).tooltip(n)
         .child(tile(n, { kind: "vm", size: 18 }))
         .child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).text_color(a.on ? t.foreground : t.muted).child(n))
         .child(div().w(46).flex_none().child(switchEl(t, `${idp}-on-${i}`, a.on, (cx) => { a.on = !a.on; if (!a.on) a.sudo = false; onChange?.(cx); cx.notify(); })))
         .child(div().w(36).flex_none().tooltip(sudoAvail ? "Let this agent use sudo here" : "Sudo is off for this machine")
           .child(switchEl(t, `${idp}-su-${i}`, a.sudo, (cx) => { a.sudo = !a.sudo; if (a.sudo) a.on = true; onChange?.(cx); cx.notify(); }, !sudoAvail)));
-    }));
+    });
+  // Many machines: the rows scroll in a fixed-height box (the dialog keeps its buttons on screen).
+  return v_flex().rounded(T.r.panel).border_1().border_color(t.border).overflow_hidden()
+    .when(Boolean(search), (el) => el.child(h_flex().flex_none().p(T.sp.sm).gap(T.sp.md).items_center().bg(t.raised).child(search)))
+    .child(h_flex().flex_none().h(28).px(12).gap(8).items_center().bg(t.raised).text_size(T.text.xs).text_color(t.dim)
+      .child(div().flex_1().child(`Machine · ${on} of ${names.length}`))
+      .when(names.length > 8, (el) => el.child(link(`${idp}-all`, "All", true)).child(link(`${idp}-none`, "None", false)))
+      .child(div().w(46).flex_none().child("Access")).child(div().w(36).flex_none().child("Sudo")))
+    .child(!rows.length ? h_flex().h(36).px(12).items_center().text_size(T.text.sm).text_color(t.dim).child("No matches")
+      : names.length > 8 ? scrollY(`${idp}-scroll`, v_flex().max_h(36 * 8).children(rows), { grow: false }) : v_flex().children(rows));
 }

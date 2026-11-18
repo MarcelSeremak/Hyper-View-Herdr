@@ -6,9 +6,9 @@ import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import {
   vmStats, selectProject, button, meter, pill, card, empty, tile, iconEl,
   fmtBytes, pct, hpCmd, installKey, grid, gridCols, sshAlias, OK, WARN, BAD, INFO, colorFor, agentAvatar, liveAgent,
-  splitRow, sideCol, lockOf, lockTip, openVm, loadMachines, loadLocks, vmHealth, clear, demo,
+  splitRow, sideCol, lockOf, lockTip, openVm, loadMachines, loadLocks, vmHealth, clear, demo, toast,
 } from "./lib.js";
-import { shared } from "herdr";
+import { shared, setShared, exec } from "herdr";
 import { spark, heatGrid, loadColor, legend } from "./charts.js";
 import { openForm, switchEl } from "./form.js";
 
@@ -75,7 +75,8 @@ export function vmView(ws, t, v) {
             .child(div().text_size(T.text.sm).child(st?.ok ? "Key-based login works." : st ? `Key login failed: ${st.err ?? ""}` : "Checking…")))
           .child(h_flex().gap(8).flex_wrap()
             .child(button(t, "mp-vm-ssh-pw", "Change SSH Password", () => openForm("vm-password", { machine: m.name, user: m.user }), { small: true, iconName: "key" }))
-            .child(button(t, "mp-vm-trust", "Install SSH Key", () => installKey(m.name), { small: true, iconName: "terminal" })))))
+            .child(button(t, "mp-vm-trust", "Install SSH Key", () => installKey(m.name), { small: true, iconName: "terminal" }))
+            .child(button(t, "mp-vm-check", ws.vmChecking === m.name ? "Checking…" : "Check now", (_e, cx) => checkNow(ws, m.name, cx), { small: true, iconName: "loader" })))))
       .child(card(t, "mp-vm-proj").child(cardHeader(t, "Attached to"))
         .child(h_flex().px(12).pb(12).gap(8).flex_wrap()
           .when(ws.projects.length === 0, (el) => el.child(div().text_size(T.text.sm).text_color(t.dim).child("No projects yet.")))
@@ -321,4 +322,26 @@ export function machinesOverview(ws, t, cx) {
     .child(body)
     .when(shown.length > 0, (e) => e.child(foot.border_t_1().border_color(t.border).mt(T.sp.xs)));
   return v_flex().w_full().gap(T.sp.xl).child(header).child(heat).child(toolbar).child(table);
+}
+
+// "Check now" (Access tab): one key-only ssh login right away, the result as a toast, then the
+// machine's stats are refreshed by the status bar (shared "mp.vmProbeAsk").
+function checkNow(ws, name, cx) {
+  if (ws.vmChecking) return;
+  ws.vmChecking = name; cx.notify();
+  cx.spawn(async (cx) => {
+    const r = await exec("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", sshAlias(name), "echo ok"], { timeout: 15000 }).catch((e) => ({ code: 1, stdout: "", stderr: String(e?.message ?? e) }));
+    const ok = r.code === 0 && String(r.stdout).includes("ok");
+    const hostKey = /HOST IDENTIFICATION HAS CHANGED|Host key verification failed/i.test(r.stderr ?? "");
+    if (hostKey) {
+      const m = ws.machines?.find((x) => x.name === name);
+      toast(`${name}: the server's host key changed`, `If the server was reinstalled, remove the old key and try again: ssh-keygen -R "[${m?.host ?? "host"}]:${m?.port ?? 22}"`, "error");
+    } else toast(ok ? `${name}: key-based login works` : `${name}: key login failed`,
+      ok ? "" : `${(r.stderr || "").trim().split("\n").pop() || `exit code ${r.code}`} · Herdr logs in with its own key (~/.herdr/keys), not your password; Install SSH Key puts it on the machine once.`, ok ? "success" : "error");
+    // Show the result at once (the status bar's full probe with CPU/RAM follows).
+    const all = shared("mp.vmstats") ?? {};
+    setShared("mp.vmstats", { ...all, [name]: { ...(all[name] ?? {}), ok, err: ok ? null : (r.stderr || "").trim().split("\n").pop() || `exit code ${r.code}`, at: Date.now() } });
+    setShared("mp.vmProbeAsk", { vm: name, at: Date.now() });
+    ws.vmChecking = null; cx.notify();
+  });
 }

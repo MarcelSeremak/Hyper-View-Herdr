@@ -3,7 +3,7 @@
 import { T } from "./tokens.js";
 import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { theme, closeOverlay, exec } from "herdr";
+import { theme, closeOverlay, exec, setShared } from "herdr";
 import { scrollY, hp, toast, iconEl, tile, button, BAD, OK, WARN, INFO, clear, loadSecrets, listProjects } from "./lib.js";
 import { PROVIDERS, SECRET_GROUPS, providerOf, typeOf, typeLabel, daysLeft } from "./secretkinds.js";
 import { kbd } from "./ide.js";
@@ -42,8 +42,19 @@ export class SecretWizard {
     this.error = ""; this.busy = false; this.focusedKey = null;
     this.share = new Set(this.p.edit?.projects ?? (this.p.project ? [this.p.project] : []));
     this.step = 1;
+    // "Shared with": a searchable list of projects (created here, never during render).
+    this.shareQ = InputState.new({ placeholder: "Search projects and agents" });
+    this.shareQ.on("change", (_e, cx) => { this.shareQv = this.shareQ.value().trim().toLowerCase(); cx.notify(); });
+    this.shareQv = "";
     const e = this.p.edit;
-    if (e) { const { prov, type } = typeOf(e); this.pick(prov, type, e); }
+    if (e) {
+      const { prov, type } = typeOf(e); this.pick(prov, type, e);
+      cx.spawn(async (cx) => {
+        const r = await hp(["secret", "get", e.name]);
+        if (r.ok && !String(this.values.value ?? "").trim()) { this.inputs.value?.set_value(r.out); this.values.value = r.out; }
+        cx.notify();
+      });
+    }
     else if (this.p.provider) {
       // Dev / deep link: { provider, type? } opens a later step directly.
       const prov = providerOf(this.p.provider);
@@ -89,13 +100,14 @@ export class SecretWizard {
       if (f.key === "host") return meta.host ?? String(meta.url ?? "").replace(/^https?:\/\//, "");
       return f0[f.key] ?? "";
     };
-    if (!meta) this.input("name", this.secrets ? this.suggestName() : "", "gitlab-main");
+    this.input("name", meta ? meta.name : this.secrets ? this.suggestName() : "", "gitlab-main"); // editable when editing too (rename)
     for (const f of type.fields) {
       if (f.choices) this.values[f.key] = pre(f) || f.def || f.choices[0][0];
       else this.input(f.key, pre(f), f.ph);
     }
     const s = type.secret ?? { label: "Value" };
-    this.input("value", "", meta ? "unchanged" : (s.ph ?? ""), { masked: !s.multiline, multiline: Boolean(s.multiline), rows: 5 });
+    // Shown in plain text (a local app: you see what you saved). Editing: filled with the saved value (init).
+    this.input("value", "", meta ? "Loading…" : (s.ph ?? ""), { masked: false, multiline: Boolean(s.multiline), rows: 5 });
     this.input("expires", meta?.expires ?? "", "YYYY-MM-DD");
     this.input("desc", meta?.desc ?? "", "What it is for");
     this.scopes = new Set(meta?.scopes ?? []);
@@ -118,10 +130,10 @@ export class SecretWizard {
     if (this.p.tour) { toast("Tutorial", "Nothing was saved — this was just a demo.", "info"); this.close(); return; }
     const v = (k) => String(this.values[k] ?? "").trim();
     const edit = this.p.edit;
-    const name = edit ? edit.name : slug(v("name"));
+    const name = slug(v("name")) || (edit ? edit.name : "");
     let err = "";
     if (!name) err = "Required: Name";
-    else if (!edit && this.secrets.some((s) => s.name === name)) err = `A secret named ${name} already exists.`;
+    else if (name !== edit?.name && this.secrets.some((s) => s.name === name)) err = `A secret named ${name} already exists.`;
     else {
       const miss = this.visibleFields().find((f) => !f.optional && !f.choices && !v(f.key));
       if (miss) err = `Required: ${miss.label}`;
@@ -145,6 +157,11 @@ export class SecretWizard {
       const val = f.choices ? this.values[f.key] : v(f.key);
       if (f.key === "host") host = val; else if (f.key === "user") user = val; else if (val) fields[f.key] = val;
     }
+    // Rename first (moves the value and every reference), then save the rest under the new name.
+    if (this.p.edit && name !== this.p.edit.name) {
+      const rn = await hp(["secret", "rename", this.p.edit.name, name]);
+      if (!rn.ok) return rn.err;
+    }
     const raw = String(this.values.value ?? "");
     const value = this.type.secret?.multiline ? raw.replace(/\r\n/g, "\n").trim() : raw.trim();
     const r = await hp(["secret", "set", name], {
@@ -158,6 +175,7 @@ export class SecretWizard {
     for (const s of this.share) if (!had.has(s)) await hp(["secret", "share", real], { p: s });
     for (const s of had) if (!this.share.has(s)) await hp(["secret", "unshare", real], { p: s });
     const n = this.share.size;
+    setShared("mp.reloadAt", Date.now());
     toast(`Secret ${real} saved`, n ? `Shared with ${n} project${n > 1 ? "s" : ""}` : "Not shared with any project yet", "success");
     return null;
   }
@@ -233,7 +251,7 @@ export class SecretWizard {
         .text_size(T.text.xs).text_color(t.muted).hover((st) => st.bg(t.hover).text_color(t.foreground)).tooltip(x.docs)
         .on_click(() => openDocs(x.docs))
         .child(iconEl("external", null, 12)).child("Where do I get this?"))));
-    if (!edit) rows.push(v_flex().child(this.label(t, "Name")).child(this.box(t, "name")));
+    rows.push(v_flex().child(this.label(t, "Name")).child(this.box(t, "name")));
     const vis = this.visibleFields();
     vis.forEach((f, i) => {
       if (f.join && i > 0 && !vis[i - 1].join) rows[rows.length - 1] = h_flex().gap(8).items_start().child(field(vis[i - 1]).flex_1()).child(field(f).w(f.join).flex_none());
@@ -259,11 +277,29 @@ export class SecretWizard {
     }
     rows.push(v_flex().child(this.label(t, "Notes (optional)")).child(this.box(t, "desc")));
     const projs = [...this.projects.filter((q) => !q.loose), ...this.projects.filter((q) => q.loose)];
+    const qv = this.shareQv ?? "";
+    const nameOf = (q) => (q.loose ? `${q.agents[0]?.name ?? q.name}` : q.name);
+    const shown = projs.filter((q) => !qv || `${nameOf(q)} ${q.slug} ${q.loose ? "agent loose" : "project"}`.toLowerCase().includes(qv));
+    const shareRow = (q) => {
+      const on = this.share.has(q.slug);
+      return h_flex().id(`mp-sw-sh-${q.slug}`).flex_none().h(28).px(T.sp.md).gap(T.sp.md).items_center().cursor_pointer().hover((st) => st.bg(t.hover))
+        .on_click((_e, cx) => { if (on) this.share.delete(q.slug); else this.share.add(q.slug); cx.notify(); })
+        .child(h_flex().flex_none().size(14).rounded(3).items_center().justify_center().border_1().border_color(on ? t.accent : t.input).bg(on ? t.accent : clear)
+          .when(on, (el) => el.child(iconEl("check", t.accent_foreground ?? "#ffffff", 10))))
+        .child(tile(nameOf(q), { kind: q.loose ? "agent" : "project", size: 16, radius: 4, glyph: q.loose ? "bot" : undefined }))
+        .child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).text_color(on ? t.foreground : t.muted).child(nameOf(q)))
+        .child(div().flex_none().text_size(T.text.xs).text_color(t.dim).child(q.loose ? "agent" : "project"));
+    };
     rows.push(v_flex().child(this.label(t, "Shared with"))
       .child(projs.length
-        ? h_flex().flex_wrap().gap(6).children(projs.map((q) => this.chip(t, `mp-sw-sh-${q.slug}`, q.loose ? `${q.agents[0]?.name ?? q.name} (agent)` : q.name, this.share.has(q.slug), () => {
-          if (this.share.has(q.slug)) this.share.delete(q.slug); else this.share.add(q.slug);
-        }, { check: true })))
+        ? v_flex().rounded(T.r.panel).border_1().border_color(t.border).overflow_hidden()
+          .child(h_flex().flex_none().p(T.sp.sm).gap(T.sp.md).items_center().bg(t.raised)
+            .child(h_flex().flex_1().h(T.h.btnSm).px(8).gap(6).items_center().rounded(T.r.ctrl).bg(t.background).border_1().border_color(qv ? t.accent : t.input)
+              .child(iconEl("search", t.dim, 12)).child(Input.new(this.shareQ).flex_1().h(24).text_size(T.text.sm).text_color(t.foreground)))
+            .child(div().flex_none().text_size(T.text.xs).text_color(t.dim).child(`${this.share.size} of ${projs.length}`)))
+          .child(!shown.length ? h_flex().h(28).px(T.sp.md).items_center().text_size(T.text.sm).text_color(t.dim).child("No matches")
+            : shown.length > 6 ? scrollY("mp-sw-sh-scroll", v_flex().max_h(28 * 6).children(shown.map(shareRow)), { grow: false })
+            : v_flex().children(shown.map(shareRow)))
         : div().text_size(T.text.xs).text_color(t.dim).child("No projects yet")));
     return v_flex().children(rows);
   }

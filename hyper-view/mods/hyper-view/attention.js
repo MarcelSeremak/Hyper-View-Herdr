@@ -20,8 +20,8 @@ export function startAttention(cx) {
     busy = Date.now();
     cx.spawn(async () => {
     try {
-      // Live statuses are cheap (every 3 s); the mailbox reads every project's files (every 9 s).
-      if (tick++ % 3 === 0) {
+      // Live statuses are cheap (every 3 s); the mailbox reads every project's files (every 30 s).
+      if (tick++ % 10 === 0) {
         projects = await listProjects();
         const { items, done } = await loadMailbox();
         mail = items.filter((it) => !it.auto && !done.has(it.id) && (it.kind === "ask" || it.kind === "approval"));

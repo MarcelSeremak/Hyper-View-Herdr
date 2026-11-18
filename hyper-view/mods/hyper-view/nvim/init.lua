@@ -327,7 +327,48 @@ if has_lazy then
         },
       },
     } },
-    { "stevearc/oil.nvim", lazy = is_local, cmd = "Oil", opts = {
+    { "stevearc/oil.nvim", lazy = is_local, cmd = "Oil", config = function(_, opts)
+      require("oil").setup(opts)
+      -- Windows: the ssh pty (ConPTY) adds escape sequences to output lines, so oil never sees its exact
+      -- "===READY===" / "===DONE(n)===" markers and loads for ever. Strip them before oil reads the lines.
+      local ok, Conn = pcall(require, "oil.adapters.ssh.connection")
+      if ok and Conn and Conn._handle_output and not Conn.__hv_patched then
+        Conn.__hv_patched = true
+        local orig = Conn._handle_output
+        Conn._handle_output = function(self, start_i)
+          local out = self._stdout or {}
+          for i = math.max(1, start_i or 1), #out do
+            out[i] = out[i]
+              :gsub("\27%[(%d*)C", function(n) return string.rep(" ", tonumber(n) or 1) end) -- cursor-forward = spaces
+              :gsub("\27%[[%d;?]*[%a@]", ""):gsub("\27%][^\7\27]*[\7]?", ""):gsub("\27[%(%)][%w]", "")
+          end
+          return orig(self, start_i)
+        end
+        -- ConPTY also hard-wraps lines at the pty width (80 by default), which splits long "ls -l" lines
+        -- ("Could not parse 'enerated'"). Start oil's ssh pty very wide.
+        local orig_new = Conn.new
+        Conn.new = function(url)
+          local js = vim.fn.jobstart
+          vim.fn.jobstart = function(cmd, o)
+            if type(o) == "table" and o.pty then o.width = o.width or 4000; o.height = o.height or 100 end
+            return js(cmd, o)
+          end
+          local ok2, res = pcall(orig_new, url)
+          vim.fn.jobstart = js
+          if not ok2 then error(res, 0) end
+          return res
+        end
+        -- oil reads its (still empty) terminal buffer 10 ms after output arrives and fails on it
+        -- ("attempt to index local 'last_line'"): harmless, so that one error is not shown.
+        local df = vim.defer_fn
+        vim.defer_fn = function(fn, ms)
+          return df(function()
+            local ok3, e = pcall(fn)
+            if not ok3 and not tostring(e):find("last_line", 1, true) then error(e, 0) end
+          end, ms)
+        end
+      end
+    end, opts = {
       default_file_explorer = not is_local,
       columns = { "size" },
       view_options = { show_hidden = true },
@@ -338,7 +379,10 @@ if has_lazy then
           local oil = require("oil")
           local e = oil.get_cursor_entry()
           if e and e.type ~= "directory" and vim.w.hv_sidebar then
-            local target = oil.get_current_dir() .. e.name
+            -- get_current_dir() is nil for remote (oil-ssh://) folders: use the buffer's URL then.
+            local dir = oil.get_current_dir() or vim.api.nvim_buf_get_name(0)
+            if dir:sub(-1) ~= "/" and dir:sub(-1) ~= "\\" then dir = dir .. "/" end
+            local target = dir .. e.name
             vim.cmd("wincmd l")
             vim.cmd.edit(vim.fn.fnameescape(target))
           else oil.select() end
@@ -902,7 +946,7 @@ local menu = {
   { "Toggle comment", "Ctrl+/", H.comment },
   { "Toggle word wrap", "Alt+Z", function() vim.wo.wrap = not vim.wo.wrap end },
   { "Language servers on/off (restart)", "", function() vim.cmd("HvLsp") end },
-  { "Path bar (header)", "", function() HvAction("bar") end },
+  { "Path bar (header)", "Ctrl+L", function() HvAction("bar") end },
   { "All Neovim commands", "", function() if has_snacks then Snacks.picker.commands({ layout = { preset = "vscode" } }) else vim.api.nvim_feedkeys(":", "n", false) end end },
   { "Quit editor", "", function() vim.cmd("confirm qa") end },
 }
@@ -934,6 +978,7 @@ map(ALL, "<C-p>", act("files"), { desc = "Go to file" })
 for _, k in ipairs({ "<C-S-p>", "<C-A-p>", "<F1>" }) do map(ALL, k, act("commands"), { desc = "Commands" }) end
 for _, k in ipairs({ "<C-S-f>", "<C-A-f>" }) do map(ALL, k, act("grep"), { desc = "Search in files" }) end
 map(ALL, "<C-b>", act("tree"), { desc = "Toggle file tree" })
+map(ALL, "<C-l>", act("bar"), { desc = "Go to a folder or file (path bar)" })
 map({ "n", "i", "s", "x", "t" }, "<C-`>", act("term"), { desc = "Toggle terminal" })
 map({ "n", "i", "s", "x", "t" }, "<C-@>", act("term"), { desc = "Toggle terminal" })
 map(ALL, "<C-n>", act("new"), { desc = "New file" })
@@ -1033,6 +1078,15 @@ vim.api.nvim_create_autocmd("VimEnter", { once = true, callback = function()
         end
       else
         HvOpen(g.hv_start or "~")
+        -- The file tree is on by default (like the local editor); the folder stays open on the right.
+        vim.defer_fn(function()
+          local open = false
+          for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do if vim.w[w].hv_sidebar then open = true end end
+          if not open then
+            HvAction("tree")
+            vim.defer_fn(function() local w = main_win and main_win(); if w then pcall(vim.api.nvim_set_current_win, w) end end, 80)
+          end
+        end, 300)
       end
     end
     g.hv_ready = true

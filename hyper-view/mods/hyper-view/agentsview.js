@@ -97,7 +97,7 @@ async function bulk(ws, cx, p, names, what, val) {
   let bad = 0;
   for (const a of list) {
     const live = liveAgent(p, a.name);
-    if (what === "start" && !live) { resetRestarts(p.slug, a.name); startAgent(p, a); }
+    if (what === "start" && !live) { resetRestarts(p.slug, a.name); startAgent(p, a, undefined, { show: true }); }
     else if (what === "stop" && live) { markManualStop(p.slug, a.name); run("terminal.kill", { terminal: live.address }); }
     else if (what === "restart") {
       if (live) { markManualStop(p.slug, a.name); run("terminal.kill", { terminal: live.address }); }

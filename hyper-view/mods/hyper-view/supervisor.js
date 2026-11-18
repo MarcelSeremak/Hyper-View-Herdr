@@ -25,7 +25,7 @@ import { hc, shared } from "herdr";
 import * as fs from "fs/promises";
 import { listProjects, loadProject, loadEvents, liveAgent, startAgent, projectDir, projectsRoot, hp, toast, demo, claimJob, repeat, leadOf, mentionsOf } from "./lib.js";
 
-const EVERY = 30000;
+const EVERY = 60000;
 const WINDOW = 15 * 60 * 1000;
 const MAX_RESTARTS = 3;
 const ACTIVE = new Set(["todo", "doing"]);
@@ -234,9 +234,9 @@ async function runOnce() {
         if (!tails[key]) tails[key] = await fs.readFile(`${projectDir(p.slug)}/handoff/${a.name}.txt`, "utf8").catch(() => "");
         if (ask) {
           woke[key] = ask.id;
-          startAgent(p, a, `You were started because the human wrote ${ask.to === a.name ? "to you" : "to the whole team and you are the team lead (you answer for the team)"} and is waiting for an answer. Run: hp inbox --as ${a.name}, answer with hp say --to ty, and create tasks if work is needed.${handoff(p, a, key)}`);
+          startAgent(p, a, `You were started because the human wrote ${ask.to === a.name ? "to you" : "to the whole team and you are the team lead (you answer for the team)"} and is waiting for an answer. Run: hp inbox --as ${a.name}, answer with hp say --to ty, and create tasks if work is needed.${handoff(p, a, key)}`, { quiet: true });
         } else {
-          startAgent(p, a, `You were restarted because you still have open tasks. Run: hp task list --as ${a.name}, hp inbox --as ${a.name}, then continue the task that is In Progress (or start the next To Do).${planHint}${handoff(p, a, key)}`);
+          startAgent(p, a, `You were restarted because you still have open tasks. Run: hp task list --as ${a.name}, hp inbox --as ${a.name}, then continue the task that is In Progress (or start the next To Do).${planHint}${handoff(p, a, key)}`, { quiet: true });
         }
         status[a.name] = { status: "starting", since: new Date(now).toISOString(), open: mine.length };
         continue;

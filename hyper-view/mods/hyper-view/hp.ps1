@@ -18,6 +18,7 @@ $MachinesDb = Join-Path $HerdrHome 'machines.json'
 $SecretsDb  = Join-Path $HerdrHome 'secrets.json'
 $LocksDb    = Join-Path $HerdrHome 'locks.json'
 $KeyFile    = Join-Path $HerdrHome 'keys\id_ed25519'
+$HerdrKnown = Join-Path $HerdrHome 'known_hosts'
 $BinDir     = Join-Path $HerdrHome 'bin'
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 
@@ -29,7 +30,7 @@ function Decode([string]$v) {
 }
 $Pos = New-Object System.Collections.ArrayList
 $Opt = @{}
-$Flags = @('global', 'json', 'force', 'overwrite', 'quiet', 'all', 'clear', 'dry', 'exclusive', 'ack', 'pool', 'check', 'tree')
+$Flags = @('global', 'json', 'force', 'overwrite', 'quiet', 'all', 'clear', 'dry', 'exclusive', 'ack', 'pool', 'check', 'tree', 'stdin')
 # hp git <secret> ... / hp run --with <s> ...: after the first argument of the wrapped command (or "--"),
 # everything goes to that command verbatim (so "git clone --depth 1" keeps its options).
 $Raw = $false
@@ -609,8 +610,13 @@ function Ssh-Config-Set($m) {
   $begin = "# >>> herdr $alias"; $end = "# <<< herdr $alias"
   $text = [regex]::Replace($text, '(?s)\r?\n?' + [regex]::Escape($begin) + '.*?' + [regex]::Escape($end) + '\r?\n?', "`n")
   $port = 22; if ($m.port) { $port = [int]$m.port }
-  $block = @($begin, "Host $alias", "  HostName $($m.host)", "  User $($m.user)", "  Port $port",
-    "  IdentityFile `"$KeyFile`"", '  IdentitiesOnly yes', '  StrictHostKeyChecking accept-new', '  ServerAliveInterval 30', $end) -join "`n"
+  # Same login as your own terminal: Herdr's key first, then your usual keys and ssh-agent (no IdentitiesOnly).
+  # Host keys go to Herdr's own known_hosts, so a stale or other-type entry in ~/.ssh/known_hosts
+  # (e.g. an old ECDSA line) cannot block Herdr while your terminal still connects.
+  $ids = @("  IdentityFile `"$KeyFile`"")
+  foreach ($k in @('id_ed25519', 'id_ecdsa', 'id_rsa')) { $f = Join-Path $HOME ".ssh\$k"; if (Test-Path -LiteralPath $f) { $ids += "  IdentityFile `"$f`"" } }
+  $block = @($begin, "Host $alias", "  HostName $($m.host)", "  User $($m.user)", "  Port $port") + $ids +
+    @("  UserKnownHostsFile `"$($HerdrKnown -replace '\\', '/')`"", '  StrictHostKeyChecking accept-new', '  ServerAliveInterval 30', $end) -join "`n"
   Write-Text $path (($text.TrimEnd() + "`n`n" + $block + "`n").TrimStart())
   Ssh-Protect $path
 }
@@ -649,7 +655,7 @@ function Install-Key($m, [string]$user, [string]$credTarget) {
   $port = 22; if ($m.port) { $port = [int]$m.port }
   $pub = (Read-Text "$KeyFile.pub").Trim()
   $remote = "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && (grep -qxF '$pub' ~/.ssh/authorized_keys || echo '$pub' >> ~/.ssh/authorized_keys)"
-  & ssh.exe -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -p $port "$user@$($m.host)" $remote
+  & ssh.exe -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$($HerdrKnown -replace '\\', '/')" -o ConnectTimeout=8 -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -p $port "$user@$($m.host)" $remote
   $code = $LASTEXITCODE
   Remove-Item Env:SSH_ASKPASS, Env:SSH_ASKPASS_REQUIRE, Env:HP_ASKPASS_TARGET -ErrorAction SilentlyContinue
   return ($code -eq 0)
@@ -1443,6 +1449,12 @@ $RiskBoundary = @{
 - Ask anyway: anything irreversible to data (dropping databases, deleting backups) and anything that leaves the company.
 '@
 }
+# The human's name for agents' messages (~/.herdr/profile.json: { name, forms, gen, dat }); hp's id stays "ty".
+function Human-Names {
+  $pr = Read-Json (Join-Path $HerdrHome 'profile.json') $null
+  $n = if ($pr -and $pr.name) { [string]$pr.name } else { 'the human' }
+  return @{ name = $n; forms = $(if ($pr -and $pr.forms) { [string]$pr.forms } else { $n }); gen = $(if ($pr -and $pr.gen) { [string]$pr.gen } else { $n }); dat = $(if ($pr -and $pr.dat) { [string]$pr.dat } else { $n }) }
+}
 function Contract-Text([string]$dir, $p, $allMachines) {
   $agents = @(Agents-Load $dir)
   $rk = { param($a) if ($a.PSObject.Properties['risk'] -and $RiskLevels -contains [string]$a.risk) { [string]$a.risk } else { 'balanced' } }
@@ -1462,7 +1474,8 @@ function Contract-Text([string]$dir, $p, $allMachines) {
 ## Operating reality
 
 - Several agents work in parallel in this project folder, on the same repositories and the same machines. Files can change under you; machines are shared with other projects, and some are production (__PROD__).
-- The human is **ty**. ty steers priorities, approves risky steps in the Mailbox and sees every `hp say`, `hp log` and task change live. Inside your boundaries you do not wait for permission.
+- The human is __HUMAN__; in hp commands he is `ty` (`--to ty`). In anything you write (messages, questions, notes, reports) call him __HUMAN__, never "ty", with the right Polish form: __FORMS__ (e.g. "czekam na decyzję __HUMAN_GEN__", "wyślę __HUMAN_DAT__ podsumowanie").
+- ty steers priorities, approves risky steps in the Mailbox and sees every `hp say`, `hp log` and task change live. Inside your boundaries you do not wait for permission.
 - You can be restarted at any time and lose your context. The truth lives in tasks, team memory (`hp recall`) and handoff notes, not in your head.
 - The team:
 
@@ -1486,7 +1499,10 @@ Asking: re-run the refused command with `--ask "<what and why>"` (or `hp ask "<w
 
 ## Named principles
 
-**Truthful Reporting: evidence, not assertion.** "Done", "fixed" and "works" come with the proof: the command you ran and the relevant output (test summary, HTTP status, log line). Put it on the task with `hp task review <id> --evidence "..."` or `hp task done <id> --evidence "..."`; hp warns when a task with commits has none. If you did not run it, say "not verified". Report failures and partial results plainly.
+**Truthful Reporting: evidence, not assertion.** "Done", "fixed" and "works" come with proof you really checked. Two places, two readers:
+- `--evidence` is for Marcel: in Polish, plain words, 2-5 short sentences: what you did, how you checked it, what came out and your conclusion ("Sprawdziłem logowanie na TEST trzema kontami. Wszystkie role działają, eksport CSV też. Wniosek: GUI jest gotowe do odbioru."). No links, no commit hashes, no commands, no file paths, no jargon.
+- The technical proof (commands, their output, MR or commit links, log lines) goes to the task note (`hp task note <id> "..."`), for the team.
+If you did not check it, say so plainly ("nie sprawdzone"). Report failures and partial results plainly.
 
 **Spellbound Focus.** One task at a time: the one you started. Finish it or block it explicitly before switching. Side discoveries become `hp task add` or `hp remember`, not detours.
 
@@ -1500,6 +1516,42 @@ Asking: re-run the refused command with `--ask "<what and why>"` (or `hp ask "<w
 - No tiredness or apology loops; no AI filler ("Great question", "I hope this helps", "Certainly!", "delve", "seamless", "robust") and no emoji in messages, commits or docs.
 - No premature victory: no "done" without evidence. No silent scope creep: new problems become tasks.
 - Long session: re-read your task (`hp task show <id>`) and `hp recall` before the next step.
+
+## Working with ty: when to decide, when to ask, how to write
+
+ty is one person who reads the Mailbox between other work. Ask when it really is ty's call, not out of caution, and never guess on things that are.
+
+Decide yourself (no question) when the answer follows from what is already there:
+- technical how-to: which command, tool, file layout, test or check to use, how to diagnose or fix something within your task;
+- the existing setup, the project docs, a team decision in memory (`hp recall`), or what this project already does elsewhere;
+- read-only work (inspecting, measuring, inventories) and reversible changes on TEST or lab machines that stay inside your task.
+Write such choices down when they matter later (`hp remember "<decision>" "<why>" --kind decision --as <you> --task <id>`) and mention them in your summary.
+
+Ask ty (do not guess, do not pick a value for ty) when it is a business or ownership decision, or risky:
+- requirements and policy: required times and limits (how fast to recover, how long to keep data, alert thresholds), who receives alerts or e-mails, which accounts or data may be used for tests, what counts as "accepted";
+- production (__PROD__), deleting or overwriting data, anything that leaves the company (real e-mails, external services, costs), new access or credentials, security exceptions.
+
+Do not invent requirements: follow the task, the docs and Marcel's words. Nothing like "only synthetic data" or "needs formal sign-off" unless someone asked for it. When Marcel says you decide ("zdecyduj sam", "w ustalonym przez ciebie czasie"), decide, write it down and go on. Internal addresses and services of the company (its own domain mailboxes, its own servers) are not "leaving the company". One approval covers the whole agreed plan: do not ask twice for the same thing.
+
+Missing credential, account, token, password or access: do not work around it. No borrowing someone else's session, account or logged-in browser, no looking at Marcel's screen, no asking for a secret value in the chat. Ask Marcel once, plainly, what to add and for what, e.g. "Dodaj w Tokens & Access token GitLab (uprawnienia: api, read_repository) o nazwie avds-gitlab i udostępnij go projektowi Allegro VDS TEST (albo tylko mnie)." or "Załóż w aplikacji konto testowe z rolą client_admin i zapisz jego login i hasło w Tokens & Access jako avds-test-client-admin.". Marcel adds it in Tokens & Access and shares it with the project or with you; then use it only through hp (`hp secret list --as <you>`, `hp git`, `hp api`, `hp run --with`). Until then, do everything else.
+
+While waiting for ty, keep working on everything that does not depend on the answer (other parts of the task, other tasks from `hp ready`). Block a task only when nothing useful is left in it.
+
+Questions go through the lead: other agents send theirs to the lead (`hp say --to <lead> ...`); the lead removes duplicates and what the team can answer itself, and sends ty one message with at most 3 numbered questions (not several messages in a row).
+
+Between agents, keep it short and useful: hand off work, ask, or report something the other needs. No thanks, no acks of acks, no repeating what is already in the task note. Overlapping tasks: the lead decides who does what at once, in one message, and fixes the task titles. A question may suggest an answer ("polecam 1"), but for ty's decisions never act on silence: wait for the answer.
+
+How to write to ty (messages, questions, approvals, reports):
+
+- In ty's language (Polish), in plain everyday words. Short sentences, a space after every comma and period.
+- No internal jargon and no abbreviations without explanation: write "czas przywracania po awarii (RTO)", not "RTO". No table names, IDs or file paths unless ty needs them to answer.
+- Start with the point in one sentence: what you need, or what happened. Then at most 3 short bullet points.
+- A question ends with choices ty can answer in one word ("Odpowiedz 1 albo 2."), your recommendation marked.
+- Anything that needs Marcel to answer or to do something (a decision, adding access or a credential, logging in, attaching machines) is a question: it contains a question mark or "Odpowiedz" ("Czy możesz dodać ...?"). That is what puts it in his Mailbox. Status, reports and "noted" messages have neither: they stay in the chat.
+- About 6 lines at most. Details go to the task note, not to ty.
+
+Bad: "Czekam na ty w Mailbox #15: potwierdzenie zakresu epiku z rozbieznym opisem, SLA/RPO/RTO, HA/PITR, scenariusz NAS i zasoby izolowanej proby."
+Good: "Potrzebuję decyzji, jak szybko system TEST ma wracać po awarii. 1) Do 4 godzin, dane z ostatniej doby (polecam). 2) Do 1 godziny, potrzebny drugi serwer. Odpowiedz 1 albo 2."
 
 ## Working loop
 
@@ -1538,7 +1590,8 @@ Capture bar: write it down if a teammate starting fresh would lose 10+ minutes w
 Good: `hp remember "npm ci fails with EACCES on api-01" "The npm cache is owned by deploy; run: hp ssh api-01 'sudo -u deploy npm ci'" --kind gotcha`.
 Bad: "Fixed the build", "Worked on tests today", or anything the code or commit message already says.
 '@
-  return $t.Replace("`r`n", "`n").Replace('__TEAM__', $team).Replace('__BOUNDARIES__', ($bl -join "`n`n")).Replace('__PROD__', $prodTxt)
+  $hm = Human-Names
+  return $t.Replace("`r`n", "`n").Replace('__HUMAN__', $hm.name).Replace('__FORMS__', $hm.forms).Replace('__HUMAN_GEN__', $hm.gen).Replace('__HUMAN_DAT__', $hm.dat).Replace('__TEAM__', $team).Replace('__BOUNDARIES__', ($bl -join "`n`n")).Replace('__PROD__', $prodTxt)
 }
 function Write-AgentDocs([string]$dir) {
   $p = Load-Project $dir
@@ -1605,6 +1658,7 @@ Everything you send with ``hp say`` is visible live to the human in the chat pan
 
 - ``hp say --as <you> "message"`` - to the whole team (a team message; ``@agent`` in the text mentions an agent).
 - ``hp say --as <you> --to <agent> [--task <id>] "message"`` - to a single agent (``--to ty`` = to the human).
+- A message with several lines (a list, points): write it to a file and send ``hp say --as <you> --to <who> --file <path>`` (or pipe it: ``Get-Content <path> | hp say --as <you> --to <who> --stdin``). On Windows a line break inside the quoted text cuts the message after the first line.
 - ``hp inbox --as <you>`` - new messages for you (``[team]``, ``[team, @you]`` or ``[direct]``). Check after every major step.
 - ``hp wait --as <you> --timeout 600`` - wait for a message when you have nothing to do.
 - ``hp log --as <you> [--task <id>] "what I did"`` - history entry (e.g. an important command, a deploy result).
@@ -1641,9 +1695,9 @@ Statuses: backlog, todo, doing, review, blocked, done. Priorities: low, normal, 
 - ``hp ready --as <you>`` - what you can start now; ``hp task claim <id> --as <you>`` - take it (atomic, with a lease); ``hp task start <id> --as <you>`` - start your own task.
 - ``hp task handoff <id> --to <agent> --as <you> --note "..."`` / ``hp task release <id> --as <you> [--pool]`` - pass it on / give it back.
 - ``hp task progress <id> <0-100> --as <you>`` - progress.
-- ``hp task review <id> --as <you> --note "what to check" --evidence "test output summary"`` - ready for review (another agent or the human checks it). If the team has an agent on the other engine (Claude Code / Codex), hp gives it a high-priority task "Review #<id>: ...".
+- ``hp task review <id> --as <you> --note "what to check" --evidence "<plain Polish: what I did, how I checked, conclusion>"`` - ready for review (another agent or the human checks it). If the team has an agent on the other engine (Claude Code / Codex), hp gives it a high-priority task "Review #<id>: ...".
 - ``hp task block <id> --as <you> --reason "waiting for X"`` - blocked (say who/what you are waiting for).
-- ``hp task done <id> --as <you> --note "result" --evidence "how it was verified"`` - done (hp warns when a task with commits or links has no evidence).
+- ``hp task done <id> --as <you> --note "result" --evidence "<plain Polish: what I did, how I checked, conclusion>"`` - done (hp warns when a task with commits or links has no evidence).
 - ``hp task note <id> --as <you> "note"``.
 - ``hp task link <id> <url> --as <you> --kind commit|mr|pr [--title "short title"]`` - attach a commit or merge/pull request (GitLab or GitHub) to the task.
 
@@ -1655,7 +1709,7 @@ Move your own tasks through the board yourself; the human watches it live.
 2. While working: ``hp task progress <id> <0-100> --as <you>`` after each meaningful step.
 3. After every commit you push: ``hp task link <id> <commit url> --as <you> --kind commit --title "commit message"``.
 4. After opening a merge/pull request: ``hp task link <id> <MR/PR url> --as <you> --kind mr`` (GitLab) or ``--kind pr`` (GitHub), with ``--title``.
-5. Ready for review: ``hp task review <id> --as <you> --note "what to check" --evidence "what you ran and its result"``.
+5. Ready for review: ``hp task review <id> --as <you> --note "what to check" --evidence "<plain Polish summary>"`` (commands, output and links go to ``hp task note``).
 6. Finished: ``hp task done <id> --as <you> --note "result" --evidence "..."``. Reviewing someone else's task ("Review #<id>"): verify it yourself, then ``hp task done <review id> --evidence "..."``, or send the findings to the owner (``hp say --to <owner> --task <id>``).
 7. Blocked: ``hp task block <id> --as <you> --reason "what you are waiting for"``, then ``hp say --to <agent or ty>``.
 
@@ -1690,6 +1744,7 @@ The app restarts stopped agents that still have To Do / In Progress tasks, so a 
 6. Do not touch another agent's tasks without agreeing first, except as described in "Team status" above.
 7. Before a dangerous operation, follow "Sacred boundaries": if your level says ask, use ``hp ask`` (or ``--ask`` on the refused command) and ``hp wait-approval``. Lock the machine first (``hp lock``).
 8. Before a long pause or when your context gets long: ``hp reflect "<done, next, open questions>" --as <you>``.
+9. Never wait for an answer in your own terminal: nobody watches it. Every question or decision for ty goes to the Mailbox: ``hp say --to ty "<question>" --as <you> [--task <id>]``; every permission (a command your level does not allow, anything outside your sandbox) goes through ``hp ask "<what and why>" --as <you> [--cmd "<command>"]`` and ``hp wait-approval <id> --as <you>``. Meanwhile continue with other work (``hp ready``).
 
 ## Memory and approvals reference
 
@@ -2389,6 +2444,12 @@ hp - Herdr: projects, machines, secrets, chat and agent tasks
           Write-Output ("{0}`t{1}@{2}:{3}`t{4}`t{5}`t{6}`t{7}" -f $m.name, $m.user, $m.host, $m.port, $m.os, $sudo, $access, $m.desc)
         }
       }
+      # Rewrites every machine's "herdr-<name>" block in ~/.ssh/config (after a change in how Herdr logs in).
+      'sync-config' {
+        $n = 0
+        foreach ($m in (Machines-Load)) { Ssh-Config-Set $m; $n++ }
+        Write-Output "ok $n"
+      }
       'trust' {
         $name = P 2 'machine name'; $m = Find-Machine $name
         $ok = Install-Key $m $m.user "vm:${name}:ssh"
@@ -2408,6 +2469,15 @@ hp - Herdr: projects, machines, secrets, chat and agent tasks
         Cred-Set "vm:${name}:sudo" $user $pw
         Docs-For-Machine $name
         Write-Output 'ok'
+      }
+      # The saved SSH / sudo password, for the human's edit form (Herdr panel). Never for agents.
+      'getpass' {
+        if ((O 'as') -or $env:HERDR_AGENT) { Fail 'Agents cannot read machine passwords.' }
+        $name = P 2 'machine name'; [void](Find-Machine $name)
+        $which = [string](O 'which' 'ssh'); if ($which -ne 'sudo') { $which = 'ssh' }
+        $r = Cred-Get "vm:${name}:$which"
+        if ($null -eq $r) { Fail "No $which password saved for $name." }
+        Write-Output ([string]$r[1])
       }
       'password' {
         $name = P 2 'machine name'; $m = Find-Machine $name
@@ -2601,6 +2671,34 @@ hp - Herdr: projects, machines, secrets, chat and agent tasks
         $t = Read-Text (Join-Path $HerdrHome 'secret-uses.jsonl')
         if ($t) { $t -split "`n" | Where-Object { $_ -match ('"secret":"' + [regex]::Escape($name) + '"') } | Select-Object -Last ([int](O 'tail' 50)) | Write-Output }
       }
+      # Renames a secret: its value (Credential Manager), metadata, and the references to it
+      # (project sources, ${secret:NAME} in MCP servers).
+      'rename' {
+        $old = P 2 'secret name'; $new = Slugify (P 3 'new name')
+        $meta = Find-Secret $old
+        if ($old -ne $new) {
+          foreach ($s in (Secrets-Load)) { if ($s.name -eq $new) { Fail "A secret named '$new' already exists." } }
+          $r = Secret-Read $old
+          if ($null -ne $r) { Secret-Write $new ([string]$r[0]) ([string]$r[1]) }
+          With-Lock $HerdrHome {
+            $list = @(Secrets-Load)
+            foreach ($s in $list) { if ($s.name -eq $old) { $s.name = $new; Set-Prop $s 'updated' (Now-Iso) } }
+            Secrets-Save $list
+          }
+          foreach ($d in (All-Projects)) {
+            $p = Load-Project $d.FullName; $hit = $false
+            foreach ($s in (Sources-Of $p)) { if ($s.secret -eq $old) { $s.secret = $new; $hit = $true } }
+            if ($hit) { Save-Project $d.FullName $p }
+          }
+          $mcp = Join-Path $HerdrHome 'mcp.json'
+          $t = Read-Text $mcp
+          $from = '${secret:' + $old + '}'; $to = '${secret:' + $new + '}'
+          if ($t -and $t.Contains($from)) { Write-Text $mcp ($t.Replace($from, $to)) }
+          if ($null -ne $r) { Secret-DropChunks $old; [void](Cred-Del "secret:$old") }
+          Docs-All
+        }
+        Write-Output $new
+      }
       'rm' {
         $name = P 2 'secret name'
         Secret-DropChunks $name
@@ -2609,7 +2707,7 @@ hp - Herdr: projects, machines, secrets, chat and agent tasks
         Docs-All
         Write-Output 'ok'
       }
-      default { Fail 'hp secret set|list|get|vars|share|unshare|uses|rm' }
+      default { Fail 'hp secret set|list|get|vars|share|unshare|uses|rename|rm' }
     }
   }
 
@@ -2807,6 +2905,11 @@ hp - Herdr: projects, machines, secrets, chat and agent tasks
   'say' {
     $dir = Find-Project; $me = Me
     $text = Rest 1
+    # Multi-line text: hp.cmd goes through cmd.exe, which cuts arguments at the first line break. So a
+    # message with lines comes from a file (--file <path>, UTF-8) or from stdin (... | hp say --to x --stdin).
+    $mf = O 'file'
+    if ($mf) { if (-not (Test-Path -LiteralPath $mf)) { Fail "No such file: $mf" }; $text = (Read-Text $mf).Trim() }
+    elseif (O 'stdin') { $text = ([Console]::In.ReadToEnd()).Trim() }
     if (-not $text) { Fail 'Empty message' }
     $to = O 'to' 'all'; $task = O 'task'; $thread = [string](O 'thread' '')
     # --reply <m-id>: answer that message in its thread, to its sender (unless --to says otherwise).
@@ -4087,7 +4190,9 @@ if [ -n "$F" ]; then git -c core.quotepath=off diff --no-color --no-ext-diff $FR
       else {
         $found = $null
         foreach ($f in (Get-ChildItem -LiteralPath $dir -Recurse -Filter '*.jsonl' | Sort-Object LastWriteTime -Descending | Select-Object -First 8)) {
-          $lines = [IO.File]::ReadAllLines($f.FullName, $Utf8)
+          # Codex keeps its live session log open: read it with ReadWrite sharing, skip a file that still fails.
+          $lines = $null
+          try { $fs = New-Object IO.FileStream($f.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)); $sr = New-Object IO.StreamReader($fs, $Utf8); try { $lines = $sr.ReadToEnd() -split "`r?`n" } finally { $sr.Close() } } catch { continue }
           for ($n = $lines.Length - 1; $n -ge 0; $n--) {
             if ($lines[$n] -notmatch '"rate_limits"') { continue }
             try { $jl = $lines[$n] | ConvertFrom-Json } catch { continue }
@@ -4125,6 +4230,81 @@ if [ -n "$F" ]; then git -c core.quotepath=off diff --no-color --no-ext-diff $FR
     $dirs = if (O 'all') { @(All-Projects | ForEach-Object { $_.FullName }) } else { @(Find-Project) }
     foreach ($d in $dirs) {
       try { Write-Output (Daily-Report $d $day ([bool](O 'all'))) } catch { Write-Output "$(Slug-Of $d): failed ($($_.Exception.Message))" }
+    }
+  }
+
+  # MCP servers attached to agents (~/.herdr/mcp.json, written by the Herdr panel). Token values never
+  # leave Credential Manager: "${secret:NAME}" in an env or header value is filled in here, at start.
+  #   hp mcp exec <server>     runs a stdio server (env filled in) on this process's own stdin/stdout
+  #   hp mcp bridge <server>   an HTTP server as stdio (npx mcp-remote, headers filled in), for Codex
+  #   hp mcp headers <server>  the HTTP headers as JSON (Claude Code's headersHelper)
+  'mcp' {
+    $sub = P 1 'exec|bridge|headers'; $name = P 2 'server'
+    $db = Read-Json (Join-Path $HerdrHome 'mcp.json') $null
+    $srv = $null
+    if ($db) { foreach ($s in @(Arr $db.servers)) { if ([string]$s.name -eq $name) { $srv = $s } } }
+    if (-not $srv) { Fail "No such MCP server '$name' (Herdr: MCP servers)" }
+    $fill = {
+      param([string]$text)
+      $ev = [System.Text.RegularExpressions.MatchEvaluator] { param($m) $r = Secret-Value (Find-Secret $m.Groups[1].Value.Trim()); return [string]$r[1] }
+      return [regex]::Replace([string]$text, '\$\{secret:([^}]+)\}', $ev)
+    }
+    # Windows command-line quoting (CommandLineToArgvW rules).
+    $quote = {
+      param([string]$a)
+      if ($a -ne '' -and $a -notmatch '[\s"]') { return $a }
+      $b = [regex]::Replace($a, '(\\*)"', { param($m) $m.Groups[1].Value + $m.Groups[1].Value + '\"' })
+      $b = [regex]::Replace($b, '(\\+)$', { param($m) $m.Groups[1].Value + $m.Groups[1].Value })
+      return '"' + $b + '"'
+    }
+    $pairs = { param($list) $out = [ordered]@{}; foreach ($e in @(Arr $list)) { if ($e -and [string]$e.name) { $out[[string]$e.name] = (& $fill ([string]$e.value)) } }; return $out }
+    # Starts a program with inherited stdin/stdout/stderr (no redirection: the MCP client talks to it directly).
+    $start = {
+      param([string]$exe, [string[]]$argList, $envs, [string]$cwd)
+      $c = @(Get-Command $exe -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Sort-Object { if ($_.CommandType -eq 'Application') { 0 } else { 1 } }) | Select-Object -First 1
+      if (-not $c) { Fail "Command not found: $exe" }
+      $path = [string]$c.Source; if (-not $path) { $path = [string]$c.Path }; if (-not $path) { $path = $exe }
+      $file = $path; $list = @($argList)
+      if ($path -match '\.(cmd|bat)$') {
+        $file = Join-Path $env:SystemRoot 'System32\cmd.exe'
+        $line = (@($path) + $list | ForEach-Object { & $quote ([string]$_) }) -join ' '
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $file; $psi.Arguments = '/d /s /c "' + $line + '"'
+      } else {
+        if ($path -match '\.ps1$') { $list = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $path) + $list; $file = 'powershell.exe' }
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $file; $psi.Arguments = (@($list | ForEach-Object { & $quote ([string]$_) })) -join ' '
+      }
+      $psi.UseShellExecute = $false
+      if ($cwd) { $psi.WorkingDirectory = $cwd }
+      foreach ($k in @($envs.Keys)) { $psi.EnvironmentVariables[[string]$k] = [string]$envs[$k] }
+      $proc = [System.Diagnostics.Process]::Start($psi)
+      $proc.WaitForExit()
+      exit $proc.ExitCode
+    }
+    switch ($sub) {
+      'headers' {
+        $h = & $pairs $srv.headers
+        Write-Output (ConvertTo-Json -InputObject $h -Compress)
+      }
+      'exec' {
+        if ([string]$srv.transport -eq 'http') { Fail "MCP server '$name' is an HTTP server (hp mcp bridge $name)." }
+        $argList = @(@(Arr $srv.args) | ForEach-Object { & $fill ([string]$_) })
+        & $start ([string]$srv.command) $argList (& $pairs $srv.env) ([string]$srv.cwd)
+      }
+      'bridge' {
+        if (-not [string]$srv.url) { Fail "MCP server '$name' has no URL." }
+        # mcp-remote expands ${VAR} in --header itself, so values with spaces ("Bearer x") stay out of the command line.
+        $argList = @('-y', 'mcp-remote', (& $fill ([string]$srv.url)))
+        $envs = [ordered]@{}; $i = 0
+        foreach ($e in @(Arr $srv.headers)) {
+          if (-not ($e -and [string]$e.name)) { continue }
+          $i++; $envs["HV_MCP_H$i"] = (& $fill ([string]$e.value))
+          $argList += @('--header', ([string]$e.name + ':${HV_MCP_H' + $i + '}'))
+        }
+        & $start 'npx' $argList $envs ''
+      }
+      default { Fail 'hp mcp exec|bridge|headers <server>' }
     }
   }
 
