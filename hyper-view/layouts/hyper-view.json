@@ -36,7 +36,7 @@
             }
           ],
           "size": {
-            "px": 405
+            "px": 268
           },
           "min": 48,
           "max": 440,
@@ -135,25 +135,10 @@
                       "type": "column",
                       "children": [
                         {
-                          "id": "mp-ed-bar",
-                          "type": "block",
-                          "content": {
-                            "mod": "hyper-view",
-                            "props": {
-                              "role": "editor-bar",
-                              "vm": "piotrh-lab"
-                            }
-                          },
-                          "size": {
-                            "px": 40
-                          },
-                          "resizable": false
-                        },
-                        {
                           "id": "mp-vmterm-term",
                           "type": "block",
                           "content": {
-                            "terminal": "t1y"
+                            "terminal": "t7d"
                           },
                           "background": "background",
                           "border": {
@@ -167,7 +152,7 @@
                         12,
                         24
                       ],
-                      "gap": 8
+                      "gap": 0
                     }
                   ],
                   "active": "mp-vmterm"
@@ -233,7 +218,7 @@
   "background": "canvas",
   "theme": {
     "light": "hyper-view-light",
-    "dark": "hyper-view-dark"
+    "dark": "atom-one-dark"
   },
   "font": "JetBrains Mono",
   "font_size": 13,

@@ -24,7 +24,17 @@ const A = (globalThis.__hvActivity ??= { P: {}, seen: null, busy: 0, lastFull: 0
 
 // ------------------------------------------------------------ helpers
 const pad = (n) => String(n).padStart(2, "0");
-export const dayOf = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+// Called per item in renders: the last day's [start, end) is remembered, so most calls are two comparisons.
+let DAY = { from: 0, to: 0, s: "" };
+export const dayOf = (ms) => {
+  const n = Number(ms);
+  if (n >= DAY.from && n < DAY.to) return DAY.s;
+  const d = new Date(n);
+  const s = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const a = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  DAY = { from: a, to: new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime(), s };
+  return s;
+};
 const clip = (s, n = 90) => { const x = String(s ?? "").replace(/\s+/g, " ").trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
 const firstLine = (s) => String(s ?? "").split(/\r?\n/).find((l) => l.trim()) ?? "";
 export function shortPath(p) {

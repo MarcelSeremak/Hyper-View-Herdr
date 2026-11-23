@@ -15,7 +15,7 @@ import { h_flex, v_flex, Input } from "gpui-base";
 import { readTextFile, writeTextFile, appHome } from "herdr";
 import * as fs from "fs/promises";
 import { emptyLine, trackHover, hovered, section } from "./ide.js";
-import { demo, herdrHome, hpScript, iconButton, card, grid, toast, iconEl, tile, scrollY } from "./lib.js";
+import { demo, herdrHome, hpScript, iconButton, card, grid, toast, iconEl, tile, scrollY, hp, OK, BAD } from "./lib.js";
 import { relTime } from "./ide.js";
 import { switchEl } from "./form.js";
 import { DEFAULT_SKILLS } from "./defaultskills.js";
@@ -147,14 +147,19 @@ export async function prepareKit(project, agent) {
     // -c values that are not valid TOML are taken as plain strings: paths and URLs need no quotes.
     await fs.mkdir(`${kitRoot()}/mcp`, { recursive: true });
     for (const s of servers) {
+      // Own key "herdr_<name>": a server of the same name in ~/.codex/config.toml (added in the Codex / ChatGPT
+      // app, e.g. with a url) would be merged with these -c values, and Codex refuses to start on
+      // "url is not supported for stdio". The tools then show as herdr_<name>.
+      const key = `herdr_${String(s.name).replace(/[^A-Za-z0-9_-]/g, "_")}`;
       if (s.transport === "http" && !(s.headers ?? []).length && !hasSecretIn(s)) {
-        argv.push("-c", `mcp_servers.${s.name}.url=${s.url}`);
+        argv.push("-c", `mcp_servers.${key}.url=${s.url}`);
         continue;
       }
       const shim = `${kitRoot()}/mcp/${s.name}.cmd`;
       await fs.writeFile(shim, `@powershell.exe ${PS.join(" ")} "${hp}" mcp ${s.transport === "http" ? "bridge" : "exec"} ${s.name}\r\n`);
-      argv.push("-c", `mcp_servers.${s.name}.command=${winPath(shim)}`, "-c", `mcp_servers.${s.name}.startup_timeout_sec=60`);
+      argv.push("-c", `mcp_servers.${key}.command=${winPath(shim)}`, "-c", `mcp_servers.${key}.startup_timeout_sec=60`);
     }
+    notes.push(`MCP servers attached to you (their tools are in your tool list): ${servers.map((s) => `herdr_${String(s.name).replace(/[^A-Za-z0-9_-]/g, "_")} (${s.name})`).join(", ")}.`);
   }
   return { argv, note: notes.join(" ") };
 }
@@ -229,6 +234,39 @@ export function skillsView(ws, t, openForm) {
     }, true)), ws.contentW(), { min: 320, gap: T.sp.md })));
 }
 
+// Test connection: hp mcp test <server> starts / calls it like an agent would (initialize + tools/list).
+const MCPT = (globalThis.__hvMcpTest ??= {});
+function testServer(s, cx) {
+  if (MCPT[s.id]?.busy) return;
+  MCPT[s.id] = { busy: true };
+  cx.notify();
+  cx.spawn(async (cx) => {
+    const r = await hp(["mcp", "test", s.name], {}, 120000);
+    let j = null;
+    try { j = JSON.parse(String(r.out).split(/\r?\n/).filter((l) => l.trim().startsWith("{")).pop()); } catch {}
+    MCPT[s.id] = j
+      ? { ok: Boolean(j.ok), text: j.ok ? `Connected${j.server ? ` · ${j.server}` : ""} · ${j.tools} tool${j.tools === 1 ? "" : "s"}`
+        : `Failed: ${j.error || "no answer"}`, tip: (j.toolNames ?? []).join(", "), list: Array.isArray(j.toolList) ? j.toolList : j.toolList ? [j.toolList] : [], open: false, at: Date.now() }
+      : { ok: false, text: `Failed: ${(r.err || r.out || "no answer").split(/\r?\n/)[0].slice(0, 200)}`, at: Date.now() };
+    cx.notify();
+  });
+}
+// The result line; after a successful test it unfolds into the server's tools with their descriptions.
+function toolsResult(t, s) {
+  const r = MCPT[s.id];
+  const list = r.list ?? [];
+  const can = r.ok && list.length > 0;
+  const row = (x, i) => v_flex().id(`mp-mcp-tl-${s.id}-${i}`).w_full().py(T.sp.xs).gap(2).border_b_1().border_color(t.border)
+    .child(div().text_size(T.text.xs).font_medium().font_family("JetBrains Mono").text_color(t.foreground).truncate().child(String(x.name ?? "")))
+    .when(Boolean(x.desc), (e) => e.child(div().text_size(T.text.xs).text_color(t.dim).whitespace_normal().child(String(x.desc))));
+  return v_flex().w_full().gap(T.sp.xs)
+    .child(h_flex().id(`mp-mcp-res-${s.id}`).w_full().gap(T.sp.xs).items_center().when(can, (e) => e.cursor_pointer()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { r.open = !r.open; cx.notify(); }).tooltip(r.open ? "Hide the tools" : "Show the tools"))
+      .when(can, (e) => e.child(iconEl(r.open ? "chevron-down" : "chevron-right", OK, 11)))
+      .child(div().flex_1().min_w(0).truncate().text_size(T.text.xs).text_color(r.ok ? OK : BAD).child(r.text)))
+    .when(can && r.open, (e) => e.child(scrollY(`mp-mcp-tls-${s.id}`, v_flex().w_full().max_h(260).pr(T.sp.sm).children(list.map(row)), { grow: false })));
+}
 export function mcpView(ws, t, openForm) {
   const items = ws.mcp ?? [];
   const cardFor = (s) => {
@@ -247,26 +285,23 @@ export function mcpView(ws, t, openForm) {
         .when(secrets.length > 0, (el) => el.child(h_flex().id(`mp-mcp-key-${s.id}`).gap(T.sp.xs).items_center().tooltip(`Tokens: ${secrets.join(", ")}`)
           .child(iconEl("key", t.dim, 12)).child(div().text_size(T.text.xs).text_color(t.muted).child(secrets.join(", ")))))
         .child(div().flex_1())
+        .child(h_flex().id(`mp-mcp-test-${s.id}`).flex_none().h(22).px(T.sp.sm).gap(T.sp.xs).items_center().rounded(T.r.ctrl).cursor_pointer()
+          .border_1().border_color(t.border).text_size(T.text.xs).font_medium().text_color(MCPT[s.id]?.busy ? t.dim : t.muted)
+          .hover((st) => st.bg(t.hover).text_color(t.foreground)).tooltip("Start / call the server like an agent would and list its tools")
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => testServer(s, cx))
+          .child(iconEl(MCPT[s.id]?.busy ? "loader" : "plug", null, 11)).child(MCPT[s.id]?.busy ? "Testing…" : "Test connection"))
         .when(hot, (el) => el.child(rowActions(ws, t, `mp-mcp-${s.id}`, () => openForm("mcp-edit", { edit: s }),
-          (cx) => ws.kitChange(cx, "servers", (all) => all.filter((x) => x.id !== s.id))))));
+          (cx) => ws.kitChange(cx, "servers", (all) => all.filter((x) => x.id !== s.id))))))
+      .when(Boolean(MCPT[s.id]?.text), (el) => el.child(toolsResult(t, s)));
   };
-  const tpl = (x) => h_flex().id(`mp-mcp-tpl-${x.id}`).w_full().h(52).px(T.sp.md).gap(T.sp.md).items_center().rounded(T.r.panel)
-    .bg(t.surface).border_1().border_color(t.border).cursor_pointer().hover((s) => s.bg(t.hover))
-    .on_click(() => openForm("mcp-edit", { tpl: x }))
-    .child(tile(x.title, { glyph: x.glyph, color: x.color, size: 28 }))
-    .child(v_flex().flex_1().min_w(0)
-      .child(div().text_size(T.text.sm).font_medium().truncate().child(x.title))
-      .child(div().text_size(T.text.xs).text_color(t.dim).truncate().child(x.desc)));
   return v_flex().gap(T.sp.xl)
     .child(v_flex().gap(T.sp.sm)
       .child(section(t, "Your servers", { count: items.length || null }))
-      .when(items.length === 0, (el) => el.child(card(t, "mp-mcp-empty").child(emptyLine(t, "mp-mcp-new", "No MCP servers yet. Pick one below or", ["add your own", () => openForm("mcp-edit", { tpl: MCP_TEMPLATES.find((x) => x.id === "custom-stdio") })]))))
+      .when(items.length === 0, (el) => el.child(card(t, "mp-mcp-empty").child(emptyLine(t, "mp-mcp-new", "No MCP servers yet.", ["Add a server", () => openForm("mcp-edit", {})]))))
       .when(items.length > 0, (el) => el.child(grid("mp-mcp-grid", items.slice().sort((a, b) => a.name.localeCompare(b.name)).map((s) => ws.navMark(cardFor(s), {
         key: `mcp:${s.id}`, open: () => openForm("mcp-edit", { edit: s }), keys: { e: () => openForm("mcp-edit", { edit: s }) },
-      }, true)), ws.contentW(), { min: 320, gap: T.sp.md }))))
-    .child(v_flex().gap(T.sp.sm)
-      .child(section(t, "Add a server"))
-      .child(grid("mp-mcp-tpls", MCP_TEMPLATES.map(tpl), ws.contentW(), { min: 260, gap: T.sp.md })));
+      }, true)), ws.contentW(), { min: 320, gap: T.sp.md }))));
 }
 
 // ------------------------------------------------------------ list panels (agent page, project Credentials)

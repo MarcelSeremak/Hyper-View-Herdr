@@ -4,7 +4,9 @@
 import { T } from "./tokens.js";
 import { div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { theme, exec, shared, setShared, spaces, panes, window as win } from "herdr";
+import { theme, exec, shared, setShared, spaces, panes, run, appHome, hc, agents, window as win } from "herdr";
+import * as fs from "fs/promises";
+import { startAgent, toast, sleepMs } from "./lib.js";
 import { demo, meter, fmtBytes, fmtTime, hpScript, loadMachines, listProjects, currentSlug, selectProject, liveAgent, loginProvider, measure, sshAlias, vmStats, vmHealth, openVm, showCenter, pct, watchData, claimJob, repeat, setSharedIf, clear, iconEl, OK, WARN, BAD } from "./lib.js";
 import { limitRows, limitTip, limitColor, refreshLimits } from "./sidebar.js";
 
@@ -83,12 +85,74 @@ export class Status {
     });
     // Once after a change in the agents' contract (AGENTS.md rule 9: questions / permissions via the Mailbox):
     // regenerate every project's AGENTS.md.
-    if (!demo() && shared("mp.docsVer") !== 9) {
+    if (!demo() && shared("mp.docsVer") !== 19) {
       cx.spawn(async () => {
         const r = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", hpScript(), "project", "docs", "--all"], { timeout: 120000 }).catch(() => null);
-        if (r?.code === 0) setShared("mp.docsVer", 9);
+        if (r?.code === 0) setShared("mp.docsVer", 19);
       });
     }
+    // One-time "restart every running agent" (so they read the regenerated AGENTS.md): requested by the file
+    // data/hyper-view/restart-agents.json; whoever deletes it first does the restart, exactly once.
+    if (!demo()) cx.timer.after(20000, (cx) => cx.spawn(async () => {
+      const req = `${String(appHome()).replace(/\\/g, "/").replace(/\/+$/, "")}/data/hyper-view/restart-agents.json`;
+      let only = null; // { "projects": ["slug", …] } restarts only those projects' agents
+      let all = false; // { "all": true }: also start the ones not running (and close their dead shells)
+      try { const j = JSON.parse(await fs.readFile(req, "utf8")); only = j?.projects ?? null; all = Boolean(j?.all); } catch {}
+      try { await fs.unlink(req); } catch { return; }
+      const sup = await import("./supervisor.js");
+      const list = [];
+      for (const p of await listProjects().catch(() => [])) for (const a of Array.isArray(only) && !only.includes(p.slug) ? [] : p.agents ?? []) {
+        const live = liveAgent(p, a.name);
+        if (!live && !all) continue;
+        sup.markManualStop(p.slug, a.name);
+        if (live) run("terminal.kill", { terminal: live.address });
+        list.push([p, a]);
+      }
+      if (all) {
+        // Shells left from a start that failed (Codex exited, PowerShell stayed): closed, so no duplicate tabs.
+        const ls = await hc(["ls", "--all", "--json"]).catch(() => null);
+        let terms = [];
+        try { terms = JSON.parse(ls?.stdout ?? "")?.terminals ?? []; } catch {}
+        for (const t of terms) if (t.state === "live" && /powershell/i.test(t.agent ?? "") && list.some(([p, a]) => t.where === `${p.name} / ${a.name}`)) run("terminal.kill", { terminal: t.address });
+      }
+      await sleepMs(3000);
+      for (const [p, a] of list) {
+        sup.resetRestarts(p.slug, a.name);
+        startAgent(p, a, `You were restarted so you work by the updated AGENTS.md (read it again). Run: hp task list --as ${a.name}, hp inbox --as ${a.name}, then continue your In Progress task (or start the next To Do).`, { quiet: true });
+        await sleepMs(1500);
+      }
+      toast("Agents restarted", `${list.length} agent${list.length === 1 ? "" : "s"} restarted with the new instructions.`, "success");
+    }));
+    // Diagnostics on request (v7) (data/hyper-view/diag.json { "mcp": "<server>", "agent": "<terminal tab name>" }):
+    // the agent terminal's last screen and one MCP initialize through the Codex shim, to diag-out.json.
+    // Lines that could carry a token are dropped.
+    if (!demo()) cx.timer.after(12000, (cx) => cx.spawn(async () => {
+      const dir = `${String(appHome()).replace(/\\/g, "/").replace(/\/+$/, "")}/data/hyper-view`;
+      let req = null;
+      try { req = JSON.parse(await fs.readFile(`${dir}/diag.json`, "utf8")); await fs.unlink(`${dir}/diag.json`); } catch { return; }
+      const clean = (x) => String(x ?? "").split(/\r?\n/).filter((l) => !/bearer|authorization|token|secret|password/i.test(l)).join("\n").slice(-12000);
+      const out = { at: new Date().toISOString() };
+      try {
+        const a = (agents() ?? []).find((x) => x.tab_name === req.agent);
+        out.agent = a ? { status: a.status, address: a.address } : "not found";
+        out.all = (agents() ?? []).map((x) => [x.space_name, x.tab_name, x.status, x.address]);
+        if (req.addr) { const r = await hc(["read", req.addr]).catch((e) => ({ stdout: String(e) })); out.addrScreen = clean(r?.stdout ?? r); }
+        if (req.lsAll) { const r = await hc(["ls", "--all", "--json"]).catch((e) => ({ stdout: String(e) })); out.ls = clean(r?.stdout ?? "").slice(0, 8000); }
+        if (a) { const r = await hc(["read", a.address]).catch((e) => ({ stdout: String(e) })); out.screen = clean(r?.stdout ?? r); }
+      } catch (e) { out.agentErr = String(e?.message ?? e); }
+      if (req.mcp) {
+        const shim = `${String(appHome()).replace(/\//g, "\\")}\\data\\hyper-view\\mcp\\${req.mcp}.cmd`;
+        const ps = `$init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"diag","version":"1"}}}'; ` +
+          `$psi=New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName='cmd.exe'; $psi.Arguments='/d /c ""${shim}""'; $psi.UseShellExecute=$false; ` +
+          `$psi.RedirectStandardInput=$true; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $p=[Diagnostics.Process]::Start($psi); ` +
+          `$p.StandardInput.WriteLine($init); $p.StandardInput.Flush(); $o=$p.StandardOutput.ReadLineAsync(); $e=$p.StandardError.ReadToEndAsync(); ` +
+          `$ok=$o.Wait(90000); Write-Output ('STDOUT: ' + $(if ($ok) { $o.Result } else { '(no answer in 90 s)' })); ` +
+          `try { & taskkill.exe /PID $p.Id /T /F 2>&1 | Out-Null } catch {}; if ($e.Wait(3000)) { Write-Output ('STDERR: ' + $e.Result) }`;
+        const r = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeout: 120000 }).catch((e) => ({ stdout: "", stderr: String(e?.message ?? e) }));
+        out.mcp = clean(`${r.stdout ?? ""}\n${r.stderr ?? ""}`);
+      }
+      await fs.writeFile(`${dir}/diag-out.json`, JSON.stringify(out, null, 1)).catch(() => {});
+    }));
     if (!demo() && shared("mp.sshCfgVer") !== 2) {
       cx.spawn(async (cx) => {
         const r = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", hpScript(), "vm", "sync-config"], { timeout: 60000 }).catch(() => null);

@@ -9,13 +9,14 @@
 // Zed / JetBrains project panel (dense 24 px rows, indent guides, speed search), Linear sidebar (counts dim,
 // status = dot), WAI-ARIA APG tree view keyboard: ↑↓ move, → opens a closed node / goes to the first child,
 // ← closes an open node / goes to the parent, Home/End, * expands siblings, type-ahead on letters.
+import { keyForAction } from "./lib.js";
 import { T } from "./tokens.js";
 import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { theme, shared, setShared, run, settings, keys } from "herdr";
 import {
   listProjects, loadProject, loadMachines, watchData, view, selectProject, openVm, openProjectSpace, showCenter,
-  liveAgent, loginProvider, vmStats, vmHealth, tile, iconEl, pct, clear, OK, WARN, BAD, INFO, colorFor, tourSizes,
+  liveAgent, loginProvider, vmStats, vmHealth, tile, iconEl, pct, clear, OK, WARN, BAD, INFO, colorFor,
   measure, scrollY, hp, claimJob, repeat, setSharedIf, loadLocks, lockOf, lockTip, openDashboard, openPalette, isWaiting, pumpFocus, leadOf,
 } from "./lib.js";
 import { openForm } from "./form.js";
@@ -90,7 +91,7 @@ export const ACTIVITY = [
 ];
 const keyLabel = (k) => String(k ?? "").split("-").map((p) => ({ ctrl: "Ctrl", shift: "Shift", alt: "Alt", "`": "`" }[p] ?? (p.length === 1 ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1)))).join("+");
 export function keyOf(cmd) {
-  try { return keys().find((b) => (b.section === "layout:hyper-view" || b.section === "global") && b.action === `hyper-view.${cmd}`)?.keys ?? null; } catch { return null; }
+  return keyForAction(`hyper-view.${cmd}`);
 }
 const sectionOf = (mode) => MODES[mode]?.section ?? "projects";
 const modeOfSection = (sec) => ({ projects: "projects", vms: "vms", agents: "agents", loose: "agents" }[sec] ?? "projects");
@@ -192,7 +193,7 @@ export class Sidebar {
         if (full) (this.detail ??= {})[p.slug] = { tasks: full.tasks.filter((x) => x.status !== "done" && x.kind !== "epic").length, epics: full.tasks.filter((x) => x.status !== "done" && x.kind === "epic").length };
       }
       const v = view();
-      // No project open (startup, after a tour or a delete): show the Dashboard.
+      // No project open (startup or after a delete): show the Dashboard.
       if (v.kind === "project" && !v.slug) openDashboard();
       cx.notify();
     });
@@ -304,7 +305,8 @@ export class Sidebar {
         const [label, color] = vmHealth(st);
         const lk = lockOf(m.name);
         rows.push({ key, level: 1, label: m.name, sec, exp: open, sel: here && !open, ref: { kind: "machine", name: m.name },
-          icon: () => div().relative().flex_none().child(tile(m.name, { kind: "vm", size: 14, radius: 3 }))
+          // A plain colored square (no SVG glyph): 64 machine rows, each with an icon file, were a big part of a frame.
+          icon: () => div().relative().flex_none().child(div().size(14).rounded(3).bg(colorFor(`vm:${m.name}`)).border_1().border_color("#ffffff22"))
             .child(div().absolute().right(-2).bottom(-2).size(T.dot).rounded_full().bg(color).border_1().border_color(t.chrome)),
           open: () => { openVm(m.name, here ? v.tab ?? "overview" : "overview"); showCenter("mp-view"); }, toggle: () => this.toggleOpen(key),
           right: { text: st?.ok ? pct(st.cpu) : "–", lock: lk, tip: `${m.name} · ${label}${st?.ok ? ` · CPU ${pct(st.cpu)} · RAM ${pct(st.ram)} · Disk ${pct(st.disk)}` : st?.err ? " · " + st.err : ""}${lk ? "\n" + lockTip(lk) : ""}` } });
@@ -603,6 +605,7 @@ export class Sidebar {
   }
 
   render(cx) {
+    const T0 = Date.now();
     const t = theme();
     const v = view();
     // Hot reload keeps old instances without re-running init: make the state lazily (not in render).
@@ -625,20 +628,17 @@ export class Sidebar {
     const rail = this.activityBar(t, v);
     if (isCollapsed(LEFT)) return h_flex().id("mp-sidebar").size_full().bg(t.chrome).on_size_change(measure("side")).child(rail);
 
+    const T1 = Date.now();
     const sec = sectionOf(modeOf(v));
     this.sec = sec;
     const group = this.build(t, v, sec);
+    const T2 = Date.now();
     const flat = group.rows;
     K(this).kbList = flat;
     if (this.kbSel && !flat.some((x) => x.key === this.kbSel)) this.kbSel = flat.find((x) => x.sel)?.key ?? flat[0]?.key ?? null;
     // Keep the keyboard row on screen (rows are direct children of the scroll column).
     const at = flat.findIndex((x) => x.key === this.kbSel);
     if (this.kbOn && at >= 0 && at !== this.lastAt) { this.lastAt = at; try { K(this).scroll?.scroll_to_item(at); } catch {} }
-    // Tutorial geometry (tour.js): the shown section's height in window px (zoomed), from the row count.
-    let zm = 1;
-    try { zm = Number(settings()?.zoom) || 1; } catch {}
-    for (const [k] of SECTIONS) tourSizes()[`side.${k === "agents" ? "loose" : k}`] = { w: (tourSizes()["side.explorer"]?.w ?? 220), h: k === sec ? flat.length * ROW * zm : 0 };
-    tourSizes()["side.dashboard"] = { w: 0, h: 0 };
 
     const add = this.addOf(sec);
     const head = v_flex().flex_none().on_size_change(measure("side.search"))
@@ -662,6 +662,7 @@ export class Sidebar {
         .child(this.filter ? Input.new(this.filter).flex_1().h(22).text_size(T.text.sm).text_color(t.foreground) : div().flex_1())
         .when(Boolean(this.q), (el) => el.child(div().flex_none().text_size(T.text.xs).text_color(t.dim).child(`${flat.length}`))));
 
+    const T3 = Date.now();
     const body = v_flex().pb(T.sp.md).children(flat.map((n) => this.row(t, n)))
       .when(flat.length === 0 && Boolean(this.q), (el) => el.child(div().px(T.sp.lg).py(T.sp.md).text_size(T.text.sm).text_color(t.dim).child(`Nothing matches "${this.q}"`)))
       .when(flat.length === 0 && !this.q && Boolean(add), (el) => el.child(h_flex().id("mp-tr-empty").h(ROW).px(T.sp.lg).gap(T.sp.sm).items_center().cursor_pointer()
@@ -672,6 +673,11 @@ export class Sidebar {
       .child(head)
       .child(scrollY("mp-side-scroll", K(this).scroll ? body.track_scroll(K(this).scroll) : body))
       .child(((warn) => v_flex().id("mp-side-bottom").flex_none().on_size_change(measure("side.bottom")).when(Boolean(warn), (el) => el.child(warn)))(this.limitsLine(t)));
+    const T4 = Date.now();
+    const PK = (globalThis.__hvRenderProf2 ??= { k: {} }).k;
+    for (const [k, ms] of [["Sidebar.pre", T1 - T0], ["Sidebar.build", T2 - T1], ["Sidebar.head", T3 - T2], [`Sidebar.rows(${flat.length})`, T4 - T3]]) {
+      const r = (PK[k] ??= { n: 0, total: 0, max: 0, slow: 0 }); r.n++; r.total += ms; if (ms > r.max) r.max = ms; if (ms > 50) r.slow++;
+    }
     return h_flex().id("mp-sidebar").size_full().bg(t.chrome).text_color(t.foreground)
       .on_size_change(measure("side"))
       .child(rail)

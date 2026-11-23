@@ -145,11 +145,6 @@ export class Lights {
         .child(image(icon("logo")).size(18))
         .child(div().text_size(T.text.base).font_semibold().text_color(t.foreground).child("Herdr")))
       .child(div().flex_1())
-      .child(h_flex().id("mp-tutorial").h(20).px(T.sp.sm).rounded(T.r.chip).items_center().cursor_pointer().border_1().border_color(t.border)
-        .text_size(T.text.xs).text_color(t.dim).hover((s) => s.text_color(t.foreground).border_color(t.accent))
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click(() => import("./tour.js").then((m) => m.startTour())).tooltip("Take a short guided tour (demo data)")
-        .child("Tour"))
       .child(iconButton(t, "mp-collapse-left", "sidebar", (_e, cx) => userToggleLeft(cx), "Collapse sidebar  Ctrl+Shift+B"));
   }
 }

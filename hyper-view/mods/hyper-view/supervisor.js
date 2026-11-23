@@ -23,7 +23,7 @@
 // Paused projects and agents with autorestart: false are left alone.
 import { hc, shared } from "herdr";
 import * as fs from "fs/promises";
-import { listProjects, loadProject, loadEvents, liveAgent, startAgent, projectDir, projectsRoot, hp, toast, demo, claimJob, repeat, leadOf, mentionsOf } from "./lib.js";
+import { listProjects, loadProject, loadEvents, liveAgent, startAgent, projectDir, projectsRoot, hp, toast, demo, claimJob, repeat, leadOf, mentionsOf, sendToAgent, writeOutside } from "./lib.js";
 
 const EVERY = 60000;
 const WINDOW = 15 * 60 * 1000;
@@ -37,6 +37,8 @@ const restarts = {};   // "slug/agent" -> [timestamps]
 const gaveUp = {};     // "slug/agent" -> true once reported
 const seen = {};       // "slug/agent" -> { status, since }
 const knownTasks = {}; // "slug/agent" -> Set of task ids already nudged about
+const contNudged = {}; // "slug/agent" -> last "continue your In Progress task" nudge
+const msgSeen = {}; // slug -> highest event id already looked at (new direct messages wake idle agents)
 const tails = {};      // "slug/agent" -> last terminal lines (string)
 const waiting = {};    // "slug#id" -> true while the task waits for unfinished dependencies
 let limitWarned = {};  // provider -> ts of last "limit low" message
@@ -121,9 +123,9 @@ export function startSupervisor(cx) {
   };
   cx.timer.after(8000, (cx) => tick(cx));
   repeat(cx, EVERY, (cx) => tick(cx), alive);
-  // Owner nudges: a cheap file check every 2.5 s; hp runs only when something is due.
+  // Owner nudges: a cheap file check every 5 s; hp runs only when something is due.
   let flushing = 0;
-  repeat(cx, 2500, (cx) => {
+  repeat(cx, 5000, (cx) => {
     if (!alive() || (flushing && Date.now() - flushing < 60000)) return;
     flushing = Date.now();
     cx.spawn(async () => { try { await flushNudges(); } catch {} flushing = 0; });
@@ -155,7 +157,7 @@ async function flushNudges() {
     for (const m of sent) {
       N[`${slug}/${m.agent}`] = Date.now();
       const live = liveAgent(p, m.agent);
-      if (live && (live.status === "idle" || live.status === "done")) hc(["send", live.address, `Message from ty: ${m.text}\r`]).catch(() => {});
+      if (live && (live.status === "idle" || live.status === "done")) sendToAgent(live.address, `Message from ty: ${m.text}`);
     }
   }
 }
@@ -167,6 +169,32 @@ async function runOnce() {
     const p = await loadProject(p0.slug);
     if (!p) continue;
     const status = {};
+    // New messages for an agent that is not working (Marcel's answer, an approval decision, a teammate's handoff):
+    // wake it, or it sleeps on them until something else happens (VDS TEST: "Approved #2" sat unread for 20 min).
+    // Messages from before this app started are left alone (the agents' first look is hp inbox anyway).
+    if (!p.loose || p.agents[0]?.autorestart === true) {
+      const evs = await loadEvents(p.slug).catch(() => []);
+      const maxId = evs.reduce((m, e) => Math.max(m, Number(e.id) || 0), 0);
+      const from = msgSeen[p.slug];
+      msgSeen[p.slug] = maxId;
+      // First look (app start / reload): messages of the last hour the agent has not reacted to yet (it wrote
+      // nothing after them). Later looks: everything new.
+      const unread = (e, i) => !evs.slice(i + 1).some((x) => x.from === e.to);
+      if (p.status !== "paused" && (from == null || maxId > from)) {
+        const fresh = evs.filter((e, i) => e.type === "message" && e.to && e.to !== "all" && e.from !== e.to
+          && (from != null ? (Number(e.id) || 0) > from : now - new Date(e.ts).getTime() < 3600000 && unread(e, i)));
+        for (const a of p.agents) {
+          const mine = fresh.filter((e) => e.to === a.name);
+          if (!mine.length) continue;
+          const live = liveAgent(p, a.name);
+          if (!live || live.status === "working") continue;
+          const who = [...new Set(mine.map((e) => (e.from === "ty" ? "Marcel" : e.from)))].join(", ");
+          const ap = mine.some((e) => /^(Approved|Rejected) #\d+/.test(e.text ?? ""));
+          globalThis.__hvNudged = { ...(globalThis.__hvNudged ?? {}), [`${p.slug}/${a.name}`]: now };
+          sendToAgent(live.address, `New message${mine.length > 1 ? "s" : ""} for you from ${who}${ap ? " (an approval decision)" : ""}. Run: hp inbox --as ${a.name}${ap ? `, then continue the task it unblocks (hp approvals --as ${a.name})` : ""}.`);
+        }
+      }
+    }
     // Dependencies: tell the owner when the last one is done (only on change, not on the first look).
     for (const x of p.tasks) {
       const k = `${p.slug}#${x.id}`;
@@ -174,7 +202,7 @@ async function runOnce() {
       const w = x.status !== "done" && deps.some((d) => { const y = p.tasks.find((z) => String(z.id) === String(d)); return y && y.status !== "done"; });
       if (waiting[k] && !w && deps.length && x.status !== "done" && x.agent && p.status !== "paused" && !p.loose) {
         const live = liveAgent(p, x.agent);
-        if (live && live.status !== "working") hc(["send", live.address, `Task #${x.id} ${x.title} is unblocked (all dependencies done). Run: hp task show ${x.id} --as ${x.agent}\r`]).catch(() => {});
+        if (live && live.status !== "working") sendToAgent(live.address, `Task #${x.id} ${x.title} is unblocked (all dependencies done). Run: hp task show ${x.id} --as ${x.agent}`);
       }
       waiting[k] = w;
       // Expired claim (lease) of an In Progress task: an owner that will not be restarted (removed, manual stop,
@@ -188,7 +216,7 @@ async function runOnce() {
           if (!owner || owner.autorestart === false || gaveUp[`${p.slug}/${owner.name}`]) {
             await hp(["task", "release", String(x.id)], { p: p.slug, as: "hp", pool: true, note: `claim expired; ${x.agent || "owner"} is not running` }).catch(() => {});
           } else if (live) {
-            hc(["send", live.address, `Your claim on #${x.id} ${x.title} expired. Still on it: hp task claim ${x.id} --as ${owner.name} (renews). Not: hp task release ${x.id} --as ${owner.name} --pool --note "where it stands"\r`]).catch(() => {});
+            sendToAgent(live.address, `Your claim on #${x.id} ${x.title} expired. Still on it: hp task claim ${x.id} --as ${owner.name} (renews). Not: hp task release ${x.id} --as ${owner.name} --pool --note "where it stands"`);
           }
         }
       }
@@ -246,8 +274,7 @@ async function runOnce() {
         const out = (await hc(["read", live.address, "--lines", "40"])).stdout ?? "";
         if (out.trim() && out !== tails[key]) {
           tails[key] = out;
-          await fs.mkdir(`${projectDir(p.slug)}/handoff`, { recursive: true });
-          await fs.writeFile(`${projectDir(p.slug)}/handoff/${a.name}.txt`, out);
+          await writeOutside(`${projectDir(p.slug)}/handoff/${a.name}.txt`, out); // ~/.herdr: not writable with fs
         }
       } catch {}
       if (st === "working") { delete gaveUp[key]; delete restarts[key]; }
@@ -260,7 +287,7 @@ async function runOnce() {
         const sk = stuck[key] ?? (stuck[key] = {});
         if (quiet > STUCK && !sk.asked) {
           sk.asked = now;
-          hc(["send", live.address, `Supervisor: no visible progress for ${Math.round(quiet / 60000)} min. If you are stuck, say so: hp task block <id> --as ${a.name} --reason "..." or hp say --to <agent|ty> --as ${a.name} "...". If a long command is running, carry on and run hp task progress <id> <pct> --as ${a.name} when it ends.\r`]).catch(() => {});
+          sendToAgent(live.address, `Supervisor: no visible progress for ${Math.round(quiet / 60000)} min. If you are stuck, say so: hp task block <id> --as ${a.name} --reason "..." or hp say --to <agent|ty> --as ${a.name} "...". If a long command is running, carry on and run hp task progress <id> <pct> --as ${a.name} when it ends.`);
         } else if (sk.asked && !sk.told && now - sk.asked > STUCK_TELL) {
           sk.told = now;
           await hp(["say", `${a.name} has looked stuck for ${Math.round(quiet / 60000)} min (working, no output or task change; asked ${Math.round((now - sk.asked) / 60000)} min ago without effect)${doing.length ? ` on #${doing[0].id} ${doing[0].title}` : ""}. Check its terminal; restart or reassign (hp task handoff).`],
@@ -269,27 +296,38 @@ async function runOnce() {
       }
       const ids = mine.map((x) => String(x.id));
       if (!knownTasks[key]) { knownTasks[key] = new Set(ids); continue; }
-      if (st === "idle") {
+      // "done" = finished its turn while nobody looked (Codex then waits at its prompt): same as idle here.
+      if (st === "idle" || st === "done") {
         const fresh = ids.filter((id) => !knownTasks[key].has(id));
         if (fresh.length) {
           fresh.forEach((id) => knownTasks[key].add(id));
           const ep = plans.filter((x) => fresh.includes(String(x.id))), plain = fresh.filter((id) => !ep.some((x) => String(x.id) === id));
-          if (ep.length) hc(["send", live.address, `New epic${ep.length > 1 ? "s" : ""} for you to plan: ${ep.map((x) => `#${x.id} ${x.title}`).join("; ")}. Break it into tasks: hp epic plan ${ep[0].id} --as ${a.name}\r`]).catch(() => {});
-          if (plain.length) hc(["send", live.address, `New task${plain.length > 1 ? "s" : ""} for you: ${plain.map((id) => "#" + id).join(", ")}. Run: hp ready --as ${a.name}, then hp task claim <id> --as ${a.name}\r`]).catch(() => {});
+          if (ep.length) sendToAgent(live.address, `New epic${ep.length > 1 ? "s" : ""} for you to plan: ${ep.map((x) => `#${x.id} ${x.title}`).join("; ")}. Break it into tasks: hp epic plan ${ep[0].id} --as ${a.name}`);
+          if (plain.length) sendToAgent(live.address, `New task${plain.length > 1 ? "s" : ""} for you: ${plain.map((id) => "#" + id).join(", ")}. Run: hp ready --as ${a.name}, then hp task claim <id> --as ${a.name}`);
           readyNudged[key] = { sig: readyFor(p, a.name).map((x) => x.id).join(","), ts: now };
         } else if (!doing.length && now - new Date(seen[key].since).getTime() > IDLE_READY) {
           // Idle with nothing In Progress: point it at ready work (its own To Do or unassigned team tasks).
           const ready = readyFor(p, a.name).slice(0, 3);
           const sig = ready.map((x) => x.id).join(",");
           const last = readyNudged[key];
-          if (ready.length && (!last || (last.sig !== sig && now - last.ts > READY_EVERY))) {
+          // Again every READY_EVERY while it stays idle with ready work (once was not enough: an ignored nudge
+          // left the agent idle for good).
+          if (ready.length && (!last || last.sig !== sig || now - last.ts > READY_EVERY)) {
             readyNudged[key] = { sig, ts: now };
-            hc(["send", live.address, `You are idle and there is ready work: ${ready.map((x) => `#${x.id} ${x.title}`).join("; ")}. Run: hp ready --as ${a.name}, then hp task claim <id> --as ${a.name}\r`]).catch(() => {});
+            sendToAgent(live.address, `You are idle and there is ready work: ${ready.map((x) => `#${x.id} ${x.title}`).join("; ")}. Run: hp ready --as ${a.name}, then hp task claim <id> --as ${a.name}`);
+          }
+        } else if (doing.length && now - new Date(seen[key].since).getTime() > IDLE_READY) {
+          // Idle with a task In Progress (it ended its turn, e.g. waiting for something): continue it, or say why not.
+          const last = contNudged[key];
+          if (!last || now - last > READY_EVERY) {
+            contNudged[key] = now;
+            sendToAgent(live.address, `You are idle but #${doing[0].id} ${doing[0].title} is In Progress. Continue it now. If it waits for someone: hp task block ${doing[0].id} --as ${a.name} --reason "...", then take other ready work (hp ready --as ${a.name}). Check hp inbox --as ${a.name} first.`);
           }
         }
       }
     }
-    await fs.writeFile(`${projectDir(p.slug)}/status.json`, JSON.stringify({ updated: new Date(now).toISOString(), agents: status }, null, 2)).catch(() => {});
+    // hp agent list reads it ("unknown" before: fs may not write in ~/.herdr).
+    await writeOutside(`${projectDir(p.slug)}/status.json`, JSON.stringify({ updated: new Date(now).toISOString(), agents: status }, null, 2));
   }
 }
 

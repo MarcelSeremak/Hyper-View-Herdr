@@ -18,6 +18,13 @@ import { openTaskPanel } from "./taskpanel.js";
 import { relTime, hoverAction, trackHover, hovered, emptyLine, skeleton, kbd } from "./ide.js";
 
 const file = () => `${herdrHome()}/mailbox.json`;
+const WAITS_FOR_YOU = /czek\w*\s+(na|wyłącznie na|tylko na)\s+(marcel|ty\b|twoj|twoją|twoją|decyzj\w* marcel)|waiting for (marcel|ty\b|the human|your)|mailbox/i;
+// Waits for Marcel: said so ("Czeka na Marcela:"), or not clearly the team's own wait (another task, a review,
+// a paused priority) while it names something only he can give (sudo, access, a password, a certificate, a decision).
+const INTERNAL = /waiting for (#\d+|[a-z][\w-]*-[\w-]+|review|the team)|awaiting[^.]*review|review\s*#?\d+|czek\w*\s+(wyłącznie |tylko )?na\s+(#\d+|[a-z]+-[\w-]+|agent|przegl|review|poprawk|scalen|wynik)|wstrzyman|odłożon|priorytet|bez (pytania|decyzji)[^.]*marcel/iu;
+// Whole words (Polish letters count as letters): "dostęp" must not match inside "niedostępny".
+const YOURS = /(^|[^\p{L}])(marcel\p{L}*|ty|administrator\p{L}*|sudo|uprawnie\p{L}*|hasł\p{L}*|hasl\p{L}*|certyfikat\p{L}*|poświadcze\p{L}*|dostęp\p{L}*|token\p{L}*|decyzj\p{L}*|zgod\p{L}*)(?![\p{L}])/iu;
+const waitsForYou = (r) => WAITS_FOR_YOU.test(r) || (!INTERNAL.test(r) && YOURS.test(r));
 export const ASK = /\?|\bodpowiedz\b|\breply\b/i;
 const REPORT = /^daily-/;
 const now = () => Date.now();
@@ -72,7 +79,20 @@ function demoExtras(projects) {
 // All items for every project (loose agents included), newest first.
 // done: ids that do not count right now (done or snoozed) — what dashboard, attention and the notifier skip.
 // doneIds: only the ones marked done. snooze: { id: ISO time } still in the future.
-export async function loadMailbox() {
+// Shared by the sidebar badge, dashboard, attention and notifier (each used to read every project's files on
+// its own reload): one read in flight at a time, a result is reused for 3 s. The Mailbox itself reads fresh.
+const MBC = (globalThis.__hvMbCache ??= { p: null, at: 0 });
+export function loadMailbox() {
+  if (MBC.p && Date.now() - MBC.at < 3000) return MBC.p;
+  return loadMailboxFresh();
+}
+export function loadMailboxFresh() {
+  const p = loadMailboxNow();
+  MBC.p = p; MBC.at = Date.now();
+  p.catch(() => { if (MBC.p === p) MBC.p = null; });
+  return p;
+}
+async function loadMailboxNow() {
   const [projects, { done, notify: notifyPref, snooze: snoozeAll }] = await Promise.all([listProjects(), readState()]);
   publishNotify(notifyPref);
   const doneSet = new Set(done);
@@ -101,17 +121,25 @@ export async function loadMailbox() {
         return;
       }
       // Already answered: you wrote to that agent afterwards.
-      const answered = events.slice(i + 1).some((x) => x.from === "ty" && x.to === e.from);
+      // Answered: Marcel wrote to that agent afterwards about the same task (a question with a task number is not
+      // closed by his answer to another question of that agent).
+      const answered = events.slice(i + 1).some((x) => x.from === "ty" && x.to === e.from && (e.task == null || String(x.task ?? "") === String(e.task)));
       // Plain messages (reports, "done", "noted") stay in the chat; only questions come to the Mailbox.
       if (!ASK.test(e.text ?? "")) return;
       items.push({ id: `${slug}:${e.id ?? e.ts}`, slug, proj, kind: "ask", from: e.from, text: e.text ?? "", ts: e.ts, task: e.task, auto: answered });
     });
     // Tasks: only blocked ones that wait for Marcel. Not: Review (another agent reviews it), blocked on another
     // task ("waiting for #N", hp's dependency text), or blocked on a question / approval already in the list.
-    const asked = new Set(items.filter((it) => it.slug === slug && (it.kind === "ask" || it.kind === "approval") && it.task != null).map((it) => String(it.task)));
+    // Only questions still open count (an approval is open until Approved / Rejected, whatever its ✓).
+    const asked = new Set(items.filter((it) => it.slug === slug && (it.kind === "ask" || it.kind === "approval") && it.task != null && !it.auto
+      && (it.kind === "approval" || !doneSet.has(it.id))).map((it) => String(it.task)));
     for (const x of proj.tasks) {
       if (x.status !== "blocked") continue;
-      if (/^\s*waiting for #\d+/i.test(x.blocked_reason ?? "")) continue;
+      // Only blocks that wait for you (the reason says so: "Czeka na Marcela: ...", AGENTS.md). A task waiting
+      // for a teammate, a review, another task or a paused priority is the team's business, not your Mailbox.
+      // Agents mark it (hp task block --wait marcel → waits "ty"; otherwise "team"). Older blocks without the
+      // mark: read from the reason.
+      if (x.waits === "team" || (x.waits !== "ty" && !waitsForYou(x.blocked_reason ?? ""))) continue;
       if (asked.has(String(x.id))) continue;
       const last = x.history?.length ? x.history[x.history.length - 1].ts : x.started ?? x.created;
       // Answered: you wrote to its agent about this task after it got blocked (the agent unblocks it).
@@ -123,6 +151,11 @@ export async function loadMailbox() {
   }
   if (demo()) items.push(...demoExtras(projs));
   items.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
+  // An approval request is closed only by Approve / Reject: a ✓ on it (marked done) only hid it, and the agent
+  // kept waiting for hp's answer (VDS TEST #25 waited for Approval #2 that way). Such ids do not count as done.
+  // Same for a blocked task waiting for you: only your answer (Answer) unblocks it, a ✓ just hid it.
+  const openAp = new Set(items.filter((it) => ((it.kind === "approval" && it.approvalId) || (it.kind === "task" && it.status === "blocked")) && !it.auto).map((it) => it.id));
+  for (const id of openAp) doneSet.delete(id);
   const inactive = new Set([...doneSet, ...Object.keys(snooze)]);
   const openItems = items.filter((it) => !it.auto && !inactive.has(it.id));
   const open = openItems.length;
@@ -134,7 +167,10 @@ export async function loadMailbox() {
 export function publishCount(n) { if (shared("mp.mailboxN") !== n) setShared("mp.mailboxN", n); }
 
 const S = { items: [], done: new Set(), snooze: {}, filter: "open", replyId: null, input: null, openId: null, snoozeId: null, loading: false, at: 0 };
-const isDone = (it) => it.auto || S.done.has(it.id);
+// Answered from here: gone at once, even before hp has written the answer and the next load sees it.
+const SENT = (globalThis.__hvMbSent ??= {});
+const sentNow = (it) => { SENT[it.id] = Date.now(); };
+const isDone = (it) => it.auto || S.done.has(it.id) || Date.now() - (SENT[it.id] ?? 0) < 120000;
 const snoozedUntil = (it) => { const u = S.snooze[it.id]; return u && new Date(u).getTime() > now() ? u : null; };
 const isOpen = (it) => !isDone(it) && !snoozedUntil(it);
 const countOpen = () => S.items.filter(isOpen).length;
@@ -149,7 +185,7 @@ const groupOf = () => "all";
 function refresh(cx) {
   S.loading = now();
   cx.spawn(async (cx) => {
-    try { const r = await loadMailbox(); S.items = r.items; S.done = r.doneIds; S.snooze = r.snooze; publishCount(r.open); } catch {}
+    try { const r = await loadMailboxFresh(); S.items = r.items; S.done = r.doneIds; S.snooze = r.snooze; publishCount(r.open); } catch {}
     S.at = now(); S.loading = 0;
     cx.notify();
   });
@@ -209,9 +245,10 @@ function say(cx, it, text) {
     const r = await hp(["say", it.kind === "task" ? `Answer for blocked #${it.taskId}: ${text}` : text], { p: it.slug, as: "ty", to, task: it.task ? String(it.task) : undefined });
     if (r.ok) toast(`Sent to ${to}`, it.kind === "task" ? `#${it.taskId}: it continues when it reads it.` : "", "success");
     if (r.ok && p.loose && p.agents[0] && !liveAgent(p, p.agents[0].name)) startAgent(p, p.agents[0], text);
-    if (!r.ok) toast("Message not sent", r.err, "error");
+    if (!r.ok) { delete SENT[it.id]; toast("Message not sent", r.err, "error"); }
   });
-  setDone(cx, it, true);
+  sentNow(it);
+  if (it.kind !== "task") setDone(cx, it, true); else cx.notify();
 }
 // Approval requests: hp approve|reject <id> records the answer (the agent then re-runs with --approved <id>)
 // and sends "Approved #N" / "Rejected #N" to the agent.
@@ -221,12 +258,15 @@ function decide(cx, it, verb, note) {
   if (demo()) toast(verb === "approve" ? `Approved #${it.approvalId}` : it.epicPlan ? `Plan #${it.approvalId} sent back` : `Rejected #${it.approvalId}`, "Demo mode: nothing was sent.", "success");
   else cx.spawn(async () => {
     const r = await hp([verb, String(it.approvalId)], { p: it.slug, as: "ty", note: note || undefined });
-    if (!r.ok) toast(verb === "approve" ? "Not approved" : "Not rejected", r.err, "error");
+    if (!r.ok) { delete SENT[it.id]; toast(verb === "approve" ? "Not approved" : "Not rejected", r.err, "error"); }
   });
-  setDone(cx, it, true);
+  sentNow(it);
+  cx.notify();
 }
 // A / X: approve or reject an approval request, or answer a question with a yes / no.
 // Approve / Reject only for real approval requests (hp ask: one command, once); questions are answered with Reply.
+const YES = /^\s*(tak|ok|okej|okay|zgoda|zgadzam|akceptuj|zatwierd|potwierdzam|approve|yes|r[oó]b|dzia[łl]aj|mo[żz]esz|jasne|pewnie)(?![\p{L}\d])/iu;
+const NO = /^\s*(nie|odrzu|reject|no|stop|wstrzymaj)(?![\p{L}\d])/iu;
 const canDecide = (it) => isOpen(it) && it.kind === "approval" && it.approvalId;
 function approve(cx, it) { if (!canDecide(it)) return; if (it.kind === "approval") decide(cx, it, "approve"); else say(cx, it, "Approved. Go ahead."); }
 function reject(cx, it) {
@@ -261,6 +301,12 @@ function sendReply(cx) {
   if (!it || !text) return;
   S.input.set_value("");
   if (S.reviseId === it.id) { S.reviseId = null; S.replyId = null; decide(cx, it, "reject", text); return; }
+  // A reply to an approval request that says yes / no IS the decision (the agent waits for hp approve|reject,
+  // a plain message would leave it waiting and the item in the Mailbox). The text goes along as the note.
+  if (canDecide(it) && !it.epicPlan) {
+    if (YES.test(text)) { S.replyId = null; decide(cx, it, "approve", text); return; }
+    if (NO.test(text)) { S.replyId = null; decide(cx, it, "reject", text); return; }
+  }
   say(cx, it, text);
 }
 
@@ -282,11 +328,14 @@ function row(t, it, key) {
   // Questions, messages and blocked tasks: always an answer button (the agent continues when you answer).
   // Everything open can be answered in words too: approvals and questions get Reply next to Approve / Reject
   // (e.g. "yes, but only on TEST"; a plain Approve / Reject still decides the approval itself).
-  if (canReply(it)) actions.child(small(t, `${k}-re`, it.kind === "task" ? "Answer" : "Reply", INFO, () => { if (S.replyId === it.id) S.replyId = null; else reply(it); }, hot ? "R" : null));
+  if (canReply(it)) actions.child(small(t, `${k}-re`, "Reply", INFO, () => { if (S.replyId === it.id) S.replyId = null; else reply(it); }, hot ? "R" : null));
   if (hot && it.kind === "task") actions.child(hoverAction(t, `${k}-task`, "Task", () => openTaskOf(it), null));
   if (hot && it.kind !== "task") actions.child(hoverAction(t, `${k}-open`, S.openId === it.id ? "Close" : "Read", () => openItem(it), "↵"));
   if (hot && !done) actions.child(hoverAction(t, `${k}-sz`, until ? "Unsnooze" : "Snooze", (cx) => toggleSnoozeMenu(cx, it), "S"));
-  const check = it.auto
+  const check = ((it.kind === "approval" && it.approvalId) || (it.kind === "task" && it.status === "blocked")) && !it.auto
+    ? h_flex().id(`${k}-chk`).flex_none().size(20).items_center().justify_center()
+      .tooltip(it.kind === "task" ? "Reply closes it (the agent waits for your answer)" : "Approve or Reject closes it (the agent waits for that)").child(iconEl("clock", WARN, 12))
+    : it.auto
     ? h_flex().id(`${k}-chk`).flex_none().size(20).items_center().justify_center().tooltip("Answered").child(iconEl("check", t.dim, 12))
     : h_flex().id(`${k}-chk`).flex_none().size(20).rounded_full().items_center().justify_center().cursor_pointer()
       .border_1().border_color(done ? OK : t.border).bg(done ? `${OK}26` : clear).hover((s) => s.border_color(OK))
@@ -299,7 +348,10 @@ function row(t, it, key) {
     : agentAvatar(t, it.from, liveA, 18);
   const pname = it.proj?.loose ? "loose" : it.proj?.name ?? it.slug;
   // One 32px line per item (Linear Inbox): avatar, sender, text (full text on hover), project, actions, time, done.
-  const text = it.kind === "task" ? `${TASK_EN[it.status]} · ${it.text}` : it.kind === "report" ? String(it.text).split("\n")[0] : it.text;
+  // One line in the list: a multi-line message (numbered choices) drawn into a fixed-height row overlapped
+  // the rows next to it. The whole text is in the expanded item and the tooltip.
+  const raw = it.kind === "task" ? `${TASK_EN[it.status]} · ${it.text}` : it.kind === "report" ? String(it.text).split("\n")[0] : it.text;
+  const text = String(raw ?? "").replace(/\s*\r?\n\s*/g, "  ").trim();
   // Clicking the line reads it (opens the full text below it); the buttons keep their own clicks.
   const main = trackHover(h_flex().id(k).h(T.h.row).px(12).gap(8).items_center().cursor_pointer().on_click((_e, cx) => { openItem(it); cx.notify(); }), "mb", k)
     .child(avatar)
@@ -345,7 +397,7 @@ function navItem(it) {
     a: (cx) => approve(cx, it),
     x: (cx) => reject(cx, it),
     r: () => reply(it),
-    e: (cx) => { if (!it.auto) setDone(cx, it, !isDone(it)); },
+    e: (cx) => { if (!it.auto && it.kind !== "approval" && !(it.kind === "task" && it.status === "blocked")) setDone(cx, it, !isDone(it)); },
     s: (cx) => toggleSnoozeMenu(cx, it),
   };
   if (S.snoozeId === it.id) snoozeChoices().forEach((c, n) => { keys[String(n + 1)] = (cx) => setSnooze(cx, it, c.until); });
@@ -390,7 +442,7 @@ function detail(t, it, k) {
     return v_flex().pl(38).pr(T.pad.card).pb(T.sp.lg).gap(T.sp.sm)
       .child(div().text_size(T.text.sm).font_medium().text_color(t.foreground).whitespace_normal().child(`#${it.taskId} ${it.title ?? ""}`))
       .child(div().text_size(T.text.sm).line_height(`${T.lh.base}px`).whitespace_normal().text_color(t.foreground).child(it.reason || "No reason given."))
-      .child(div().text_size(T.text.xs).text_color(t.dim).child(`${it.from} is waiting for this. Answer: your reply goes to ${it.from} with task #${it.taskId}, and it unblocks the task.`));
+      .child(div().text_size(T.text.xs).text_color(t.dim).child(`${it.from} is waiting for this. Reply: your answer goes to ${it.from} with task #${it.taskId}, and it unblocks the task.`));
   }
   const text = String(it.text ?? "");
   const body = v_flex().pl(38).pr(T.pad.card).pb(T.sp.lg).gap(T.sp.sm);

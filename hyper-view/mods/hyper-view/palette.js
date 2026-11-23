@@ -7,6 +7,7 @@
 // (→ in list views), { mode: "keys" } opens the keyboard shortcuts sheet.
 // Actions are also mod commands ("hyper-view.<cmd>" in keys.json, handled in notifier.js), so any of
 // them can get a key; the palette reads keys() and shows whatever is bound.
+import { keyForAction } from "./lib.js";
 import { T } from "./tokens.js";
 import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
@@ -48,7 +49,6 @@ export const ACTIONS = [
   { cmd: "focus-chat", title: "Focus chat composer", icon: "messages", words: "chat message type", go: () => runNav("focus-chat") },
   { cmd: "shortcuts", title: "Keyboard shortcuts", icon: "list", words: "keys hotkeys help ? cheat sheet", inline: "keys", go: () => openPaletteWith({ mode: "keys" }) },
   { cmd: "reload", title: "Reload (projects, agents, tasks…)", icon: "refresh", words: "refresh update reload sync", go: () => setShared("mp.reloadAt", Date.now()) },
-  { cmd: "tour", title: "Start tutorial", icon: "compass", words: "tour help onboarding", go: () => import("./tour.js").then((m) => m.startTour()) },
   { cmd: "demo", title: () => (demo() ? "Turn demo off" : "Turn demo on"), icon: "flask", words: "demo sample data preview", go: () => setShared("mp.demo", !demo()) },
 ];
 const VIEWS = [
@@ -90,7 +90,7 @@ export function openPaletteWith(extra) {
 const mac = () => win()?.platform === "macos";
 function keyFor(cmd) {
   const want = `hyper-view.${cmd}`;
-  try { return keys().find((b) => (b.section === "global" || b.section === "layout:hyper-view") && b.action === want)?.keys ?? null; } catch { return null; }
+  return keyForAction(want);
 }
 const keyParts = (k) => (k.endsWith("--") ? [...k.slice(0, -2).split("-"), "-"] : k.split("-"))
   .map((p) => ({ ctrl: mac() ? "⌃" : "Ctrl", cmd: "⌘", shift: mac() ? "⇧" : "Shift", alt: mac() ? "⌥" : "Alt", enter: "↵", up: "↑", down: "↓", left: "←", right: "→" }[p] ?? (p.length === 1 ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1))));
@@ -217,8 +217,18 @@ export class Palette {
 
   frame() { return this.stack[this.stack.length - 1] ?? null; }
 
+  // Memoized: the overlay re-renders on every shared-state change (agents' status, reloads); the rows only
+  // change with the query, the frame, the loaded items, the waiting list or recents.
   rows() {
     const f = this.frame();
+    const key = [this.query, f, this.items, shared("mp.waiting"), this.recent.join(",")];
+    const m = this._rowsMemo;
+    if (m && m.key.every((v, i) => v === key[i]) && Date.now() - m.at < 2000) return m.rows;
+    const rows = this.rowsNow(f);
+    this._rowsMemo = { key, rows, at: Date.now() };
+    return rows;
+  }
+  rowsNow(f) {
     if (f?.keys) return [];
     const all = f ? f.entries : this.entries();
     const q = this.query.trim().toLowerCase().replace(/\s+/g, "");

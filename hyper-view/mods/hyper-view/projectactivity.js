@@ -6,13 +6,14 @@
 //     agent filter, or "Steps": the raw virtual list (grouped by day, the current day pinned while you scroll,
 //     filters All / Edits / Commands / Tests / Errors / Messages), optionally narrowed to one run.
 // State lives on the Workspace (ws.pa*). Keyboard: j/k move, Enter opens (run: expand; step: its task), 1-6 filters (Steps).
+import { agentWorking } from "./lib.js";
 import { T } from "./tokens.js";
 import { div } from "gpui-kit";
 import { h_flex, v_flex, Popover, v_virtual_list, Scrollbar } from "gpui-base";
 import { cardHead, emptyLine, kbd } from "./ide.js";
 import { setShared } from "herdr";
 import { iconEl, card, clear, fmtTime, colorFor, openTab, agentAvatar, liveAgent, BAD, OK, popFocus, restoreFocus } from "./lib.js";
-import { actItems, dayOf, activityError } from "./activity.js";
+import { actItems, dayOf, activityError, activityVersion } from "./activity.js";
 import { KIND, FILTERS, matches, dayLabel, hpItems, fmtDur, buildRuns, runRow } from "./activityview.js";
 import { openTaskPanel } from "./taskpanel.js";
 
@@ -21,8 +22,17 @@ const PAGE = 300;
 const S = (globalThis.__hvProjAct ??= { top: 0, topDay: null, shown: null });
 
 // Every item of the project, newest first; each has .a (agent, "ty" for you).
+// Built from thousands of log steps and hp events: kept until the data changes (and at most 5 s, for live
+// statuses), not rebuilt on every frame. Rebuilding it per render ran the agent page out of render time.
+const MEMO = (globalThis.__hvProjActMemo ??= {});
+const memoKey = (ws, p) => `${p.slug}|${(ws.events ?? []).length}|${activityVersion()}|${Math.floor(Date.now() / 5000)}`;
 export function projectItems(ws, p) {
-  return [...actItems(p.slug, null), ...hpItems(ws.events ?? [], null)].sort((a, b) => b.t - a.t);
+  const k = memoKey(ws, p);
+  const m = MEMO[`items:${p.slug}`];
+  if (m && m.k === k) return m.v;
+  const v = [...actItems(p.slug, null), ...hpItems(ws.events ?? [], null)].sort((a, b) => b.t - a.t);
+  MEMO[`items:${p.slug}`] = { k, v };
+  return v;
 }
 
 function state(ws, p) {
@@ -37,9 +47,33 @@ export function openProjectActivity(ws, slug, { agent = null, run = null } = {})
   setShared("mp.view", { kind: "project", slug, tab: "activity" });
 }
 // Runs of the project (newest first); agent: only that agent's.
+// Runs are built outside render: render returns the last ones (or none yet) and queues a rebuild, which
+// workspace.js runs from a timer (computeQueuedRuns) and then redraws. Built inside render, thousands of
+// log steps ran the agent page out of render time ("interrupted" in buildRuns / hpItems).
+// Only the newest RUN_ITEMS steps (of that agent, when given) are used: plenty for the runs shown.
+const RUN_ITEMS = 1500;
+const QUEUE = (globalThis.__hvRunsQueue ??= new Map());
 export function projectRuns(ws, p, agent) {
-  const runs = buildRuns(projectItems(ws, p), p, (n) => liveAgent(p, n));
-  return agent ? runs.filter((r) => r.a === agent) : runs;
+  const mk = `runs:${p.slug}:${agent ?? "*"}`;
+  const k = memoKey(ws, p);
+  const m = MEMO[mk];
+  if (m && m.k === k) return m.v;
+  QUEUE.set(mk, { events: ws.events ?? [], p, agent, k });
+  return m?.v ?? [];
+}
+// One queued rebuild per call (a timer calls it); true when something was rebuilt (redraw).
+export function computeQueuedRuns() {
+  if (!QUEUE.size) return false;
+  const [mk, job] = QUEUE.entries().next().value;
+  QUEUE.delete(mk);
+  try {
+    const items = [...actItems(job.p.slug, job.agent).slice(0, RUN_ITEMS), ...hpItems(job.events, job.agent)]
+      .sort((a, b) => b.t - a.t).slice(0, RUN_ITEMS);
+    let runs = buildRuns(items, job.p, (n) => liveAgent(job.p, n));
+    if (job.agent) runs = runs.filter((r) => r.a === job.agent);
+    MEMO[mk] = { k: job.k, v: runs };
+  } catch { MEMO[mk] = { k: job.k, v: MEMO[mk]?.v ?? [] }; }
+  return true;
 }
 // Expanded runs (ids) live on the Workspace.
 const openSet = (ws) => (ws.runOpen ??= new Set());
@@ -97,7 +131,7 @@ function agentPicker(ws, t, p, all, agent, idp) {
 function row(t, x, id, sel, interactive, onTask) {
   const [ic, color] = KIND[x.k] ?? KIND.tool;
   const fail = x.x === "fail" || x.k === "error";
-  const running = x.x === "run" && Date.now() - x.t < 15 * 60 * 1000;
+  const running = x.x === "run" && Date.now() - x.t < 15 * 60 * 1000 && agentWorking(x.a);
   let el = h_flex().id(id).h(24).gap(T.sp.md).items_center().rounded(T.r.chip).px(T.sp.xs).when(sel, (e) => e.bg(t.hover));
   if (interactive) el = el.hover((s) => s.bg(t.hover)).tooltip(`${new Date(x.t).toLocaleString()}${x.d ? ` · ${fmtDur(x.d)}` : ""}\n${x.l}`)
     .when(Boolean(x.task && onTask), (e) => e.cursor_pointer().on_click(() => onTask(x.task)));
@@ -121,7 +155,10 @@ const dayHead = (t, id, label, n) => h_flex().id(id).h(24).px(T.sp.xs).gap(T.sp.
 export function activitySection(ws, t, p) {
   const runs = projectRuns(ws, p, null);
   const err = activityError();
-  const today = runs.filter((r) => dayOf(r.last) === dayOf(Date.now())).length;
+  const d0 = new Date(); d0.setHours(0, 0, 0, 0);
+  const from = d0.getTime();
+  let today = 0;
+  for (const r of runs) if (r.last >= from) today++;
   return card(t, "mp-pa-ov")
     .child(cardHead(t, "Activity", h_flex().id("mp-pa-open").flex_none().gap(T.sp.xs).items_center().cursor_pointer()
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())

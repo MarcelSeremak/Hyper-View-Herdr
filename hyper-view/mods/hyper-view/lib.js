@@ -3,15 +3,15 @@
 import { T } from "./tokens.js";
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, Scrollbar } from "gpui-base";
-import { exec, home, appHome, readTextFile, shared, setShared, agents, spaces, panes, run, notify, watchFolder, hc, layout } from "herdr";
+import { exec, home, appHome, readTextFile, shared, setShared, agents, spaces, panes, run, notify, watchFolder, hc, layout, writeTextFile, keys, window as hwin } from "herdr";
 import * as fs from "fs/promises";
 import { DEMO_MACHINES, DEMO_STATS, DEMO_PROJECT, DEMO_EVENTS, DEMO_LIVE, DEMO_SECRETS, DEMO_USES, DEMO_LOOSE, DEMO_LOOSE_EVENTS, DEMO_LOCKS, demoBigProject, demoMachines, demoStats, DEMO_MANY_LOCKS } from "./demo.js";
 
 // Design preview mode (set by the dev bridge): in-memory demo data, nothing on disk.
 export const demo = () => Boolean(shared("mp.demo"));
-// Live sizes of the parts the tutorial points at (filled by on_size_change in each part).
-export const tourSizes = () => (globalThis.__hvRects ??= {});
-export const measure = (key) => (size) => { tourSizes()[key] = { w: size.width, h: size.height }; };
+// Live sizes of the layout's parts (filled by on_size_change in each part; the chat reads the sidebar's width).
+export const rects = () => (globalThis.__hvRects ??= {});
+export const measure = (key) => (size) => { rects()[key] = { w: size.width, h: size.height }; };
 
 export const MOD = "hyper-view";
 export const icon = (name) => `mods/${MOD}/icons/${name}.svg`;
@@ -120,7 +120,17 @@ export const openDashboard = () => setShared("mp.view", { kind: "dashboard" });
 // Command palette (Ctrl+K; again closes). Lazy import: palette.js imports this file.
 export const openPalette = () => import("./palette.js").then((m) => m.openPaletteToggle());
 // An agent that needs you: live "blocked" or an open question/approval (attention.js publishes mp.waiting).
-export const isWaiting = (name, live) => live?.status === "blocked" || (shared("mp.waiting") ?? []).some((w) => w.name === name);
+// shared() copies the whole value out of the host on every call. Values read in render loops (every avatar,
+// every machine row) are kept for 250 ms: mp.vmstats alone is ~20 KB, read dozens of times per frame.
+const SHC = (globalThis.__hvSharedCache ??= {});
+export function sharedFast(key) {
+  const c = SHC[key], n = Date.now();
+  if (c && n - c.at < 250) return c.v;
+  const v = shared(key);
+  SHC[key] = { at: n, v };
+  return v;
+}
+export const isWaiting = (name, live) => live?.status === "blocked" || (sharedFast("mp.waiting") ?? []).some((w) => w.name === name);
 export function showCenter(child) {
   run("layout.select", { stack: "mp-center", child });
   setShared("mp.center", child);
@@ -221,7 +231,7 @@ export function setSharedIf(key, value, skip = []) {
   return true;
 }
 export function lockOf(vm) {
-  const l = arr(shared("mp.locks")).find((x) => x.vm === vm);
+  const l = arr(sharedFast("mp.locks")).find((x) => x.vm === vm); // read per machine row: cached copy
   return l && new Date(l.expires).getTime() > Date.now() ? l : null;
 }
 export const lockTip = (l) => `Locked by ${l.owner}${l.project ? ` (${l.project})` : ""} until ${fmtTime(l.expires)}: ${l.reason}`;
@@ -236,10 +246,10 @@ export async function listProjects() {
   const out = [];
   for (const n of names.sort()) {
     const dir = projectDir(n);
-    const p = await readJson(`${dir}/project.json`, null);
+    const p = await readJsonCached(`${dir}/project.json`, null);
     if (!p) continue;
-    const agentList = arr(await readJson(`${dir}/agents.json`, []));
-    out.push({ ...p, slug: n, machines: arr(p.machines), agents: agentList });
+    const agentList = arr(await readJsonCached(`${dir}/agents.json`, [])).map((a) => ({ ...a }));
+    out.push({ ...p, slug: n, machines: arr(p.machines).slice(), agents: agentList });
   }
   return out;
 }
@@ -247,22 +257,69 @@ export async function loadProject(slug) {
   if (!slug) return null;
   if (demo()) return slug === DEMO_PROJECT.slug ? (shared("mp.demoBig") ? demoBigProject() : DEMO_PROJECT) :DEMO_LOOSE.find((x) => x.slug === slug) ?? { ...DEMO_PROJECT, slug, name: slug, agents: [], tasks: [] };
   const dir = projectDir(slug);
-  const p = await readJson(`${dir}/project.json`, null);
+  const p = await readJsonCached(`${dir}/project.json`, null);
   if (!p) return null;
-  const tasks = await readJson(`${dir}/tasks.json`, { tasks: [] });
-  const agentList = arr(await readJson(`${dir}/agents.json`, [])).map((a) => ({ ...a, machines: arr(a.machines) }));
+  const tasks = (await readJsonCached(`${dir}/tasks.json`, null)) ?? { tasks: [] };
+  const agentList = arr(await readJsonCached(`${dir}/agents.json`, [])).map((a) => ({ ...a, machines: arr(a.machines).slice() }));
   // Team memory summary written by hp (counts per kind + newest titles); null until something is remembered.
   const memory = await readJson(`${dir}/memory.json`, null);
   return {
-    ...p, slug, dir, machines: arr(p.machines), agents: agentList, memory,
-    tasks: arr(tasks.tasks).map((x) => ({ ...x, notes: arr(x.notes), history: arr(x.history), priority: x.priority ?? "normal", progress: x.progress ?? 0 })),
+    ...p, slug, dir, machines: arr(p.machines).slice(), agents: agentList, memory,
+    tasks: arr(tasks.tasks).map((x) => ({ ...x, notes: arr(x.notes).slice(), history: arr(x.history).slice(), priority: x.priority ?? "normal", progress: x.progress ?? 0 })),
   };
 }
 export async function loadEvents(slug) {
   if (!slug) return [];
   if (demo()) return slug === DEMO_PROJECT.slug ? DEMO_EVENTS : DEMO_LOOSE_EVENTS[slug] ?? [];
-  return jsonl(await readBig(`${projectDir(slug)}/events.jsonl`));
+  return (await eventsCached(`${projectDir(slug)}/events.jsonl`)).slice();
 }
+// Every view reloads after each change under ~/.herdr; with a dozen agents writing events.jsonl that meant the
+// same 0.5 MB file read and JSON-parsed by several views every few seconds on the UI thread. One shared cache:
+// reads in flight are shared (1 s), unchanged text returns the parsed list, appended text parses only the tail.
+const EVC = (globalThis.__hvEvCache ??= new Map());
+function eventsCached(path) {
+  const c = EVC.get(path);
+  if (c?.p && Date.now() - c.at < 1000) return c.p;
+  const p = (async () => {
+    const text = (await readBig(path)) ?? "";
+    // Only a fingerprint (length + last 256 chars) is kept, not the text: mods have a small memory and a full
+    // heap is what makes renders run out of time ("could not be re-rendered").
+    const old = EVC.get(path);
+    const tail = text.slice(-256);
+    let list;
+    if (old?.list && old.len === text.length && old.tail === tail) list = old.list;
+    else if (old?.list && text.length > old.len && old.tail.endsWith("\n") && text.slice(old.len - old.tail.length, old.len) === old.tail) list = old.list.concat(jsonl(text.slice(old.len)));
+    else list = jsonl(text);
+    EVC.set(path, { ...EVC.get(path), len: text.length, tail, list });
+    return list;
+  })();
+  EVC.set(path, { ...(c ?? {}), p, at: Date.now() });
+  return p.catch(() => c?.list ?? []);
+}
+// Length + FNV-1a hash of a text (outside render; ~1 ms per 100 KB).
+function fingerprint(text) {
+  const s = String(text ?? "");
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return `${s.length}:${h >>> 0}`;
+}
+// Same idea for JSON files every view reads (tasks.json, agents.json, project.json, machines.json…).
+const JSC = (globalThis.__hvJsonCache ??= new Map());
+export async function readJsonCached(path, fallback) {
+  const c = JSC.get(path);
+  if (c?.p && Date.now() - c.at < 1000) return (await c.p.catch(() => undefined)) ?? fallback;
+  const p = readBig(path).then((text) => {
+    const old = JSC.get(path);
+    const fp = fingerprint(text);
+    if (old?.fp === fp && old.val !== undefined) return old.val;
+    const val = parse(text, undefined);
+    JSC.set(path, { ...JSC.get(path), fp, val });
+    return val;
+  });
+  JSC.set(path, { ...(c ?? {}), p, at: Date.now() });
+  return (await p.catch(() => undefined)) ?? fallback;
+}
+// The cached value is shared: callers copy what they change (loadProject / listProjects spread every object).
 // ------------------------------------------------------------ background work (leak guards)
 // A hot reload builds the script again while globalThis (and, for kept views, their timers) can
 // survive, so every background job is claimed by key: starting it again supersedes the old one,
@@ -313,7 +370,44 @@ function herdrChanged() {
 // Reload now, every `every` ms and after changes under ~/.herdr (a burst of writes = one reload).
 // `key` names the view (one per window): a newer build's view supersedes the old one's loops.
 // A reload that returns a Task (cx.spawn) is not started again while the previous one still runs.
+// Is the Herdr window in front? In the background the views refresh rarely (agents' work is still watched by
+// the supervisor; the screen nobody looks at does not need to follow every write).
+// keys() copies every key binding from the host (hundreds): the activity bar asked it 14 times per render, which
+// was most of the sidebar's frame. One lookup table per 5 s: "hyper-view.<cmd>" → keys.
+let KB = { at: 0, map: new Map() };
+export function keyForAction(action) {
+  if (Date.now() - KB.at > 5000) {
+    const map = new Map();
+    try {
+      for (const b of keys() ?? []) if ((b.section === "layout:hyper-view" || b.section === "global") && !map.has(b.action)) map.set(b.action, b.keys);
+    } catch {}
+    KB = { at: Date.now(), map };
+  }
+  return KB.map.get(action) ?? null;
+}
+export function appActive() { try { return hwin().active !== false; } catch { return true; } }
 export const reloadAll = () => setShared("mp.reloadAt", Date.now());
+// Types a line into an agent's terminal and presses Enter as a separate key: sent together, a TUI like Codex
+// takes the text as a paste and the Enter as a new line in its input box, so the nudge was never submitted.
+export function sendToAgent(address, text) {
+  return hc(["send", address, String(text).replace(/[\r\n]+$/, "")]).then(() => hc(["send", address, "\r"])).catch(() => {});
+}
+// Writes a file outside ~/.config/herdr-app (fs/promises may only write there; the host's writeTextFile may
+// write anywhere). Parent folders are created with PowerShell once per folder.
+const MADE = (globalThis.__hvMadeDirs ??= new Set());
+export async function writeOutside(path, text) {
+  const p = String(path).replace(/\\/g, "/"), dir = p.slice(0, p.lastIndexOf("/"));
+  if (dir && !MADE.has(dir)) {
+    await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `New-Item -ItemType Directory -Force -Path '${dir.replace(/'/g, "''")}' | Out-Null`], { timeout: 15000 }).catch(() => null);
+    MADE.add(dir);
+  }
+  for (let i = 0; i < 3; i++) {
+    const cur = await readTextFile(p).catch(() => null);
+    if (cur === text) return true;
+    try { await writeTextFile(p, text, cur ?? null); return true; } catch {}
+  }
+  return false;
+}
 export function watchData(cx, reload, every = 4000, key = null) {
   const alive = key ? claimJob(`watch:${key}`) : () => true;
   let last = null, lastAt = 0;
@@ -338,8 +432,11 @@ export function watchData(cx, reload, every = 4000, key = null) {
     for (;;) {
       try { await herdrChanged(); } catch { return; }
       if (!alive()) return;
-      // A burst of writes = one reload, and at most one watch reload per 1.5 s per view.
-      await cx.sleep(Math.max(300, 1500 - (Date.now() - at)));
+      // A burst of writes = one reload, and at most one watch reload per 4 s per view (busy agents write
+      // events.jsonl many times a second; faster reloads only fought the renders for the UI thread).
+      await cx.sleep(Math.max(500, 4000 - (Date.now() - at)));
+      // In the background: at most one reload per 30 s (the first look after coming back reloads at once).
+      while (alive() && !appActive() && Date.now() - at < 30000) await cx.sleep(1000);
       if (!alive()) return;
       at = Date.now();
       go(cx);
@@ -356,6 +453,9 @@ export function liveAgent(project, name) {
 // agents() asks the host each time; a dashboard render calls liveAgent a few hundred times (every card,
 // row and avatar), which ran the render out of time. One snapshot per 250 ms is plenty for a status dot.
 let AGS = { at: 0, list: [] };
+// Is an agent with this name working right now (its terminal says so)? An unfinished command in the log
+// alone is not enough: Codex often logs no end for a command (the agent then looked "running" while asleep).
+export function agentWorking(name) { return agentsNow().some((a) => a.tab_name === name && a.status === "working"); }
 function agentsNow() {
   const n = Date.now();
   if (n - AGS.at > 250) AGS = { at: n, list: agents() ?? [] };
@@ -436,7 +536,7 @@ export function openSsh(vm, _project) {
   setShared("mp.view", { kind: "vm", name: vm, tab: "editor" });
   import("./editor.js").then((m) => m.openEditor(vm));
 }
-export const vmStats = () => (demo() ? demoStats() : shared("mp.vmstats") ?? {});
+export const vmStats = () => (demo() ? demoStats() : sharedFast("mp.vmstats") ?? {});
 
 // ------------------------------------------------------------ design tokens
 export const OK = "#7fb08a", WARN = "#d4a35a", BAD = "#d57c74", INFO = "#6f9fd0";

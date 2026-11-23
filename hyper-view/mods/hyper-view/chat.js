@@ -5,24 +5,27 @@
 // direct/@mentioned ones, and for a team message only the lead.
 import { T } from "./tokens.js";
 import { div, svg } from "gpui-kit";
-import { h_flex, v_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { theme, hc, run, shared, setShared, exec, layout, settings } from "herdr";
+import { h_flex, v_flex, InputState, Input, ScrollHandle, TextView } from "gpui-base";
+import { theme, hc, run, shared, setShared, exec, layout, settings, appHome } from "herdr";
 import {
   currentSlug, startAgent, loadProject, loadEvents, watchData, liveAgent, agentAvatar, fmtTime, hp, toast, iconButton, icon, iconEl,
-  openTab, showCenter, clear, OK, BAD, colorFor, tile,
-measure, leadOf, mentionsOf, tourSizes, scrollY, listProjects, selectProject, view, } from "./lib.js";
+  openTab, showCenter, clear, OK, BAD, colorFor, tile, sendToAgent,
+measure, leadOf, mentionsOf, rects, scrollY, listProjects, selectProject, view, } from "./lib.js";
 import { RIGHT, LEFT, isCollapsed, togglePanel, chatHidden, rememberLayout } from "./toolbar.js";
 
 // The agent whose page is open (project agents; a loose agent's chat is its own anyway), or null.
 const agentCtxOf = () => { const v = view(); return v.kind === "project" && v.tab === "agent" && v.agent ? v.agent : null; };
 import { taskPanel, openTaskPanel } from "./taskpanel.js";
 import { relTime, kbd } from "./ide.js";
+import { copyText } from "./clipboard.js";
 
 // Quick answers to a question addressed to you (buttons + keys while the message list has the keyboard,
 // Mailbox-style): [key, label, color (null = muted), text sent].
 // A question to Marcel = a question mark or "Odpowiedz ..." (AGENTS.md tells agents so); anything else is an
 // FYI that stays in the chat. Keyword guessing ("zgoda", "potwierdź") caught plain status messages.
 const ASK = /\?|\bodpowiedz\b|\breply\b/i;
+// Message text shown through the markdown view: keep it literal (no headings, emphasis or lists from * _ # etc.).
+const mdPlain = (s) => String(s ?? "").replace(/([\\`*_{}\[\]()#+\-.!|>~<])/g, "\\$1").replace(/\n/g, "  \n");
 const QUICK = [["a", "Approve", OK, "Approved. Go ahead."], ["r", "Reject", BAD, "Rejected. Do not do it; tell me the alternative."], ["w", "Wait", null, "Wait. I will get back to you."]];
 // Focus handle of the message list (kept outside the instance: Herdr's in-place reload keeps instance fields only).
 const KCM = new WeakMap();
@@ -30,7 +33,9 @@ const KC = (o) => { let s = KCM.get(o); if (!s) KCM.set(o, (s = {})); return s; 
 
 const NUDGE_EVERY = 20000;
 const GROUP_MS = 5 * 60 * 1000;
-const SHOW = 400;
+// Messages drawn at once (newest). 400 rows with avatars ran the render out of time in a busy project
+// ("This view could not be re-rendered: interrupted"); "Show earlier" adds more on request.
+const SHOW = 50;
 const FULL = "mp.chatFull"; // chat covers the main column, from the right edge to the sidebar
 const READ_W = 820; // readable column width while full
 const MAX_PX = 4000;
@@ -44,6 +49,17 @@ function bindSendKey(cx) {
     cx.bind_keys(["MpChat > Input", "MpChatAt > Input"].map((context) => ({ keystroke: "ctrl-enter", action: "mp_chat_send", context })));
     globalThis.__hvChatSendKeys = true;
   } catch (err) { console.warn("chat: send key", err); }
+}
+
+// The chat as a second Herdr window (chatwindow.ps1: its own home ~/.config/herdr-app-chat, the same mod and data).
+let POPPING = 0;
+function openChatWindow() {
+  if (Date.now() - POPPING < 8000) return;
+  POPPING = Date.now();
+  toast("Opening the chat window…", "A second Herdr window with the chat; move it to the other monitor.", "info");
+  exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", `${String(appHome()).replace(/\\/g, "/")}/mods/hyper-view/chatwindow.ps1`], { timeout: 60000 })
+    .then((r) => { if (r?.code !== 0 || !/^OK/m.test(r?.stdout ?? "")) toast("Chat window did not open", String(r?.stdout || r?.stderr || "").trim().slice(0, 300), "error"); })
+    .catch((e) => toast("Chat window did not open", String(e?.message ?? e), "error"));
 }
 
 export class Chat {
@@ -122,7 +138,7 @@ export class Chat {
   // Column width that reaches the sidebar: window - sidebar - 1 px divider - 10 px gap.
   fullPx() {
     // Window width (logical px) minus the sidebar as it really is (measured) minus divider + gap.
-    const z = tourSizes();
+    const z = rects();
     const vw = globalThis.window?.viewport_size?.()?.width ?? 0;
     const side = z.side?.w ?? (shared(LEFT.key) ? LEFT.rail : LEFT.open);
     // Layout sizes are in unzoomed px; the window is measured zoomed (Ctrl +/- zoom) — convert.
@@ -219,11 +235,6 @@ export class Chat {
 
   // Conversation filter: click an agent's name/avatar in a message (or a rail avatar); a removable
   // pill in the header shows it. Messages go to the team unless @one-agent or a reply.
-  // The tutorial can pick a chat filter (shared "mp.chatPick" = { name, at }).
-  pickFromTour() {
-    const cp = shared("mp.chatPick");
-    if (cp && cp.at !== this.pickAt) { this.pickAt = cp.at; this.pick(cp.name ?? null); }
-  }
   pick(name) {
     this.filter = name ?? null;
     this.pair = null;
@@ -239,7 +250,7 @@ export class Chat {
       const events = await loadEvents(slug);
       const switched = project?.slug !== this.project?.slug;
       this.project = project;
-      if (switched) { this.seen = events.length; this.pick(project?.loose ? null : agentCtxOf()); this.unread = 0; }
+      if (switched) { this.seen = events.length; this.showN = null; this.pick(project?.loose ? null : agentCtxOf()); this.unread = 0; }
       else this.nudge(events);
       const grew = events.length - this.events.length;
       if (grew > 0 && !switched) { this.lastAt = Date.now(); if (isCollapsed(RIGHT)) this.unread += grew; }
@@ -282,7 +293,7 @@ export class Chat {
       if (Date.now() - (this.nudged[name] ?? 0) < NUDGE_EVERY) continue;
       if (Date.now() - (globalThis.__hvNudged?.[`${p.slug}/${name}`] ?? 0) < NUDGE_EVERY) continue; // supervisor.js owner nudge just did it
       this.nudged[name] = Date.now();
-      hc(["send", live.address, `${say[why](name)}\r`]).catch(() => {});
+      sendToAgent(live.address, say[why](name));
     }
   }
 
@@ -406,7 +417,9 @@ export class Chat {
     else if (this.tab === "commands") list = list.filter((e) => e.type === "tool");
     if (this.pair) { const [a, b] = this.pair; list = list.filter((e) => (e.from === a && e.to === b) || (e.from === b && e.to === a)); }
     else if (this.filter) list = list.filter((e) => e.from === this.filter || e.to === this.filter);
-    return list.slice(-SHOW);
+    const n = this.showN ?? SHOW;
+    this.hiddenN = Math.max(0, list.length - n);
+    return list.slice(-n);
   }
 
   send(cx) {
@@ -498,13 +511,18 @@ export class Chat {
             .child(`→ ${e.to === "ty" ? "you" : e.to}`)))
           .when(Boolean(e.task), (el) => el.child(div().text_size(T.text.xs).text_color(t.dim).child(`#${e.task}`)))
           .child(relTime(t, `mp-c-ts-${i}`, e.ts, { text: fmtTime(e.ts) }))))
-        .child(div().text_size(T.text.xs).line_height(`${T.lh.sm}px`).whitespace_normal().text_color(t.foreground).child(e.text))
+        // Selectable text (drag to select, Ctrl+C) only for the message you are on (hover / clicked): a text view
+        // per message for all of them would make the chat heavy. The rest is plain text; the copy button copies all.
+        .child(hovered || this.selText === i
+          ? TextView.markdown(`mp-c-txt-${i}`, mdPlain(e.text)).selectable(true).w_full().text_size(T.text.xs).text_color(t.foreground)
+          : div().text_size(T.text.xs).line_height(`${T.lh.sm}px`).whitespace_normal().text_color(t.foreground).child(e.text))
         // A question to you: answer with one click.
         .when(askedMe, (el) => el.child(h_flex().pt(4).pb(2).gap(6)
           .children(QUICK.map(([key, label, color, text]) => quick(`mp-c-q${key}-${i}`, label, color ?? t.muted, text, key))))))
       // Hover: reply straight to the sender (icon button, top right of the row).
-      .when(hovered && !mine, (el) => el.child(h_flex().absolute().top(grouped ? 0 : 8).right(12).child(
-        iconButton(t, `mp-c-reply-${i}`, "send", (_e, cx) => { this.replyTo = e; this.input.focus(); cx.notify(); }, `Reply to ${e.from}`, { size: 22, filled: true }))));
+      .when(hovered, (el) => el.child(h_flex().absolute().top(grouped ? 0 : 8).right(12).gap(4)
+        .child(iconButton(t, `mp-c-copy-${i}`, "copy", (_e, cx) => { this.selText = i; cx.spawn(async () => toast((await copyText(String(e.text ?? ""))) ? "Copied" : "Copy failed", "", "success")); }, "Copy message", { size: 22, filled: true }))
+        .when(!mine, (row) => row.child(iconButton(t, `mp-c-reply-${i}`, "send", (_e, cx) => { this.replyTo = e; this.input.focus(); cx.notify(); }, `Reply to ${e.from}`, { size: 22, filled: true })))));
   }
 
   filterTo(name, cx) {
@@ -554,7 +572,6 @@ export class Chat {
   }
 
   render(cx) {
-    this.pickFromTour();
     // Keyboard zone "chat" (F6 / "c" in the view, shortcuts.js): the task panel's composer when it is open, else the chat's.
     const fz = shared("mp.focus");
     if (fz?.to === "chat" && fz.at !== this.fzAt && Date.now() - fz.at < 3000) {
@@ -611,8 +628,10 @@ export class Chat {
     this.syncMailbox(cx);
     if (isCollapsed(RIGHT)) return this.rail(t);
     if (tp?.slug) return taskPanel(this, t, tp);
-    const full = Boolean(this.fullOn);
-    const read = (el) => (full ? el.w_full().max_w(READ_W) : el);
+    // The separate chat window reads like the full-width chat: one centered column, not edge to edge.
+    const full = Boolean(this.fullOn) || Boolean(globalThis.__hvStandalone);
+    const solo = Boolean(globalThis.__hvStandalone);
+    const read = (el) => (full ? el.w_full().max_w(solo ? 720 : READ_W) : el);
     const list = this.visible();
     const live = Date.now() - this.lastAt < 60000 || (p && p.agents.some((a) => liveAgent(p, a.name)?.status === "working"));
     const at = Boolean(p) && this.atOpen();
@@ -633,8 +652,11 @@ export class Chat {
       .on_mouse_down("left", () => { globalThis.__hvZone = "chat"; })
       // One simple header: collapse, full width, "Chat", the project.
       .child(h_flex().flex_none().px(12).pt(12).pb(12).gap(8).items_center().border_b_1().border_color(t.border)
-        .child(iconButton(t, "mp-chat-collapse", "chevron-right", (_e, cx) => this.collapse(cx), "Collapse panel"))
-        .child(iconButton(t, "mp-chat-full", full ? "minimize" : "maximize", (_e, cx) => this.toggleFull(cx), full ? "Restore width" : "Expand to full width", { color: full ? t.accent : undefined }))
+        // The separate chat window (layouts/hyper-chat.json in ~/.config/herdr-app-chat) has no column to fold or widen.
+        .when(!globalThis.__hvStandalone, (el) => el
+          .child(iconButton(t, "mp-chat-collapse", "chevron-right", (_e, cx) => this.collapse(cx), "Collapse panel"))
+          .child(iconButton(t, "mp-chat-full", full ? "minimize" : "maximize", (_e, cx) => this.toggleFull(cx), full ? "Restore width" : "Expand to full width", { color: full ? t.accent : undefined }))
+          .child(iconButton(t, "mp-chat-popout", "external", () => openChatWindow(), "Open the chat in its own window (e.g. on a second monitor)")))
         .child(div().text_size(T.text.sm).font_semibold().child("Chat"))
         // Outside a project view the conversation can be switched (any project or loose agent).
         .when(view().kind !== "project", (el) => el.child(h_flex().id("mp-chat-switch").flex_1().min_w(0).gap(4).items_center().cursor_pointer()
@@ -644,12 +666,15 @@ export class Chat {
           .child(iconEl(this.switching ? "chevron-up" : "chevron-down", this.switching ? t.accent : t.dim, 12))))
         .when(view().kind === "project" && Boolean(p), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).text_color(t.dim).child(`· ${p.loose ? p.agents[0]?.name ?? p.name : p.name}`)))
         .when(Boolean(p) && Boolean(fLabel), (el) => el.child(pill())))
-      .child(scrollY("mp-chat-scroll", v_flex().id("mp-chat-list").flex_1().min_h(0).track_scroll(this.scroll).pb(12).when(full, (el) => el.items_center())
+      .child(scrollY("mp-chat-scroll", v_flex().id("mp-chat-list").flex_1().min_h(0).track_scroll(this.scroll).pb(12).when(full, (el) => el.items_center()).when(solo, (el) => el.px(40))
         .when(Boolean(KC(this).fh), (el) => el.track_focus(KC(this).fh)).key_context("HvChatList").on_key_down((e, cx) => this.listKey(e, cx))
         .when(list.length === 0 && Boolean(p), (el) => el.child(div().w_full().px(T.pad.card).py(T.pad.card).text_size(T.text.sm).text_color(t.dim).whitespace_normal()
           .child("No messages yet. Write below to brief the team, or @name to ask one agent.")))
         .when(!p && view().kind === "project", (el) => el.child(this.picker(t)))
         .when((this.switching || !p) && view().kind !== "project", (el) => el.child(this.switcher(t)))
+        .when(!(this.switching && view().kind !== "project") && this.hiddenN > 0, (el) => el.child(h_flex().id("mp-chat-earlier").w_full().h(28).justify_center().items_center().cursor_pointer()
+          .on_click((_e, cx) => { this.showN = (this.showN ?? SHOW) + SHOW; cx.notify(); })
+          .child(div().text_size(T.text.xs).text_color(t.accent).hover((st) => st.opacity(0.8)).child(`Show ${Math.min(this.hiddenN, SHOW)} earlier (${this.hiddenN} more)`))))
         .when(!(this.switching && view().kind !== "project"), (el) => el.children(list.map((e, i) => read(this.item(t, e, i, list[i - 1])))))))
       .when(Boolean(p), (el) => el.child(h_flex().flex_none().px(12).pb(12).pt(12).justify_center().border_t_1().border_color(t.border).child(read(v_flex().flex_1().min_w(0).gap(8))
         .when(Boolean(this.replyTo), (el) => el.child(h_flex().h(28).pl(8).pr(4).gap(8).items_center().border_l_2().border_color(t.accent)

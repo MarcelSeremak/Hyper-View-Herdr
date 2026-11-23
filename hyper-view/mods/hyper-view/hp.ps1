@@ -1500,7 +1500,7 @@ Asking: re-run the refused command with `--ask "<what and why>"` (or `hp ask "<w
 ## Named principles
 
 **Truthful Reporting: evidence, not assertion.** "Done", "fixed" and "works" come with proof you really checked. Two places, two readers:
-- `--evidence` is for Marcel: in Polish, plain words, 2-5 short sentences: what you did, how you checked it, what came out and your conclusion ("Sprawdziłem logowanie na TEST trzema kontami. Wszystkie role działają, eksport CSV też. Wniosek: GUI jest gotowe do odbioru."). No links, no commit hashes, no commands, no file paths, no jargon.
+- `--evidence` is for __HUMAN__: in Polish, plain words, 2-5 short sentences: what you did, how you checked it, what came out and your conclusion ("Sprawdziłem logowanie na TEST trzema kontami. Wszystkie role działają, eksport CSV też. Wniosek: GUI jest gotowe do odbioru."). No links, no commit hashes, no commands, no file paths, no jargon.
 - The technical proof (commands, their output, MR or commit links, log lines) goes to the task note (`hp task note <id> "..."`), for the team.
 If you did not check it, say so plainly ("nie sprawdzone"). Report failures and partial results plainly.
 
@@ -1517,7 +1517,7 @@ If you did not check it, say so plainly ("nie sprawdzone"). Report failures and 
 - No premature victory: no "done" without evidence. No silent scope creep: new problems become tasks.
 - Long session: re-read your task (`hp task show <id>`) and `hp recall` before the next step.
 
-## Working with ty: when to decide, when to ask, how to write
+## Working with __HUMAN__ (hp id: ty): when to decide, when to ask, how to write
 
 ty is one person who reads the Mailbox between other work. Ask when it really is ty's call, not out of caution, and never guess on things that are.
 
@@ -1531,23 +1531,25 @@ Ask ty (do not guess, do not pick a value for ty) when it is a business or owner
 - requirements and policy: required times and limits (how fast to recover, how long to keep data, alert thresholds), who receives alerts or e-mails, which accounts or data may be used for tests, what counts as "accepted";
 - production (__PROD__), deleting or overwriting data, anything that leaves the company (real e-mails, external services, costs), new access or credentials, security exceptions.
 
-Do not invent requirements: follow the task, the docs and Marcel's words. Nothing like "only synthetic data" or "needs formal sign-off" unless someone asked for it. When Marcel says you decide ("zdecyduj sam", "w ustalonym przez ciebie czasie"), decide, write it down and go on. Internal addresses and services of the company (its own domain mailboxes, its own servers) are not "leaving the company". One approval covers the whole agreed plan: do not ask twice for the same thing.
+Do not invent requirements: follow the task, the docs and __HUMAN__'s words. Nothing like "only synthetic data" or "needs formal sign-off" unless someone asked for it. When __HUMAN__ says you decide ("zdecyduj sam", "w ustalonym przez ciebie czasie"), decide, write it down and go on. Internal addresses and services of the company (its own domain mailboxes, its own servers) are not "leaving the company". One approval covers the whole agreed plan: do not ask twice for the same thing.
 
-Missing credential, account, token, password or access: do not work around it. No borrowing someone else's session, account or logged-in browser, no looking at Marcel's screen, no asking for a secret value in the chat. Ask Marcel once, plainly, what to add and for what, e.g. "Dodaj w Tokens & Access token GitLab (uprawnienia: api, read_repository) o nazwie avds-gitlab i udostępnij go projektowi Allegro VDS TEST (albo tylko mnie)." or "Załóż w aplikacji konto testowe z rolą client_admin i zapisz jego login i hasło w Tokens & Access jako avds-test-client-admin.". Marcel adds it in Tokens & Access and shares it with the project or with you; then use it only through hp (`hp secret list --as <you>`, `hp git`, `hp api`, `hp run --with`). Until then, do everything else.
+Missing credential, account, token, password or access: do not work around it. No borrowing someone else's session, account or logged-in browser, no looking at __HUMAN__'s screen, no asking for a secret value in the chat. Ask __HUMAN__ once, plainly, what to add and for what, e.g. "Dodaj w Tokens & Access token GitLab (uprawnienia: api, read_repository) o nazwie avds-gitlab i udostępnij go projektowi Allegro VDS TEST (albo tylko mnie)." or "Załóż w aplikacji konto testowe z rolą client_admin i zapisz jego login i hasło w Tokens & Access jako avds-test-client-admin.". __HUMAN__ adds it in Tokens & Access and shares it with the project or with you; then use it only through hp (`hp secret list --as <you>`, `hp git`, `hp api`, `hp run --with`). Until then, do everything else.
 
-While waiting for ty, keep working on everything that does not depend on the answer (other parts of the task, other tasks from `hp ready`). Block a task only when nothing useful is left in it.
+Before asking __HUMAN__ about one environment (e.g. PROD), check how the other one (TEST) already does it and what was decided there (`hp recall`, the TEST project's notes): copy that unless something really differs. One round of questions = one message: collect them first, do not send several messages in a row. A task __HUMAN__ paused or deprioritized goes back to the backlog (`hp task backlog <id>`), not to Blocked.
+
+While waiting for ty, keep working on everything that does not depend on the answer (other parts of the task, other tasks from `hp ready`). Block a task only when nothing useful is left in it. A task blocked because it waits for __HUMAN__ is blocked with `--wait marcel` and a reason that says what he must give (`hp task block <id> --as <you> --wait marcel --reason "Czeka na __HUMAN__a: sudo na srv-..."`): only those reach his Mailbox. A task waiting for a teammate, a review or another task is blocked without it ("waiting for #44") and stays on the team's board.
 
 Questions go through the lead: other agents send theirs to the lead (`hp say --to <lead> ...`); the lead removes duplicates and what the team can answer itself, and sends ty one message with at most 3 numbered questions (not several messages in a row).
 
-Between agents, keep it short and useful: hand off work, ask, or report something the other needs. No thanks, no acks of acks, no repeating what is already in the task note. Overlapping tasks: the lead decides who does what at once, in one message, and fixes the task titles. A question may suggest an answer ("polecam 1"), but for ty's decisions never act on silence: wait for the answer.
+Between agents and in task notes, plain words with normal spaces (no glued words or IDs like "zgodnie zm2791"), in Polish, short and useful: hand off work, ask, or report something the other needs. No thanks, no acks of acks, no repeating what is already in the task note. Overlapping tasks: the lead decides who does what at once, in one message, and fixes the task titles. A question may suggest an answer ("polecam 1"), but for ty's decisions never act on silence: wait for the answer.
 
-How to write to ty (messages, questions, approvals, reports):
+How to write to __HUMAN__ (messages, questions, approvals, reports):
 
 - In ty's language (Polish), in plain everyday words. Short sentences, a space after every comma and period.
 - No internal jargon and no abbreviations without explanation: write "czas przywracania po awarii (RTO)", not "RTO". No table names, IDs or file paths unless ty needs them to answer.
 - Start with the point in one sentence: what you need, or what happened. Then at most 3 short bullet points.
 - A question ends with choices ty can answer in one word ("Odpowiedz 1 albo 2."), your recommendation marked.
-- Anything that needs Marcel to answer or to do something (a decision, adding access or a credential, logging in, attaching machines) is a question: it contains a question mark or "Odpowiedz" ("Czy możesz dodać ...?"). That is what puts it in his Mailbox. Status, reports and "noted" messages have neither: they stay in the chat.
+- Anything that needs __HUMAN__ to answer or to do something (a decision, adding access or a credential, logging in, attaching machines) is a question: it contains a question mark or "Odpowiedz" ("Czy możesz dodać ...?"). That is what puts it in his Mailbox. Status, reports and "noted" messages have neither: they stay in the chat.
 - About 6 lines at most. Details go to the task note, not to ty.
 
 Bad: "Czekam na ty w Mailbox #15: potwierdzenie zakresu epiku z rozbieznym opisem, SLA/RPO/RTO, HA/PITR, scenariusz NAS i zasoby izolowanej proby."
@@ -1658,7 +1660,7 @@ Everything you send with ``hp say`` is visible live to the human in the chat pan
 
 - ``hp say --as <you> "message"`` - to the whole team (a team message; ``@agent`` in the text mentions an agent).
 - ``hp say --as <you> --to <agent> [--task <id>] "message"`` - to a single agent (``--to ty`` = to the human).
-- A message with several lines (a list, points): write it to a file and send ``hp say --as <you> --to <who> --file <path>`` (or pipe it: ``Get-Content <path> | hp say --as <you> --to <who> --stdin``). On Windows a line break inside the quoted text cuts the message after the first line.
+- A message with several lines (a list, points) or with Polish letters: write it to a UTF-8 file (``[IO.File]::WriteAllText("<path>", "<text>", [Text.UTF8Encoding]::new(`$false))``) and send ``hp say --as <you> --to <who> --file <path>``. Do not pipe text into hp: Windows PowerShell turns Polish letters into "?". On Windows a line break inside the quoted text cuts the message after the first line.
 - ``hp inbox --as <you>`` - new messages for you (``[team]``, ``[team, @you]`` or ``[direct]``). Check after every major step.
 - ``hp wait --as <you> --timeout 600`` - wait for a message when you have nothing to do.
 - ``hp log --as <you> [--task <id>] "what I did"`` - history entry (e.g. an important command, a deploy result).
@@ -1696,7 +1698,7 @@ Statuses: backlog, todo, doing, review, blocked, done. Priorities: low, normal, 
 - ``hp task handoff <id> --to <agent> --as <you> --note "..."`` / ``hp task release <id> --as <you> [--pool]`` - pass it on / give it back.
 - ``hp task progress <id> <0-100> --as <you>`` - progress.
 - ``hp task review <id> --as <you> --note "what to check" --evidence "<plain Polish: what I did, how I checked, conclusion>"`` - ready for review (another agent or the human checks it). If the team has an agent on the other engine (Claude Code / Codex), hp gives it a high-priority task "Review #<id>: ...".
-- ``hp task block <id> --as <you> --reason "waiting for X"`` - blocked (say who/what you are waiting for).
+- ``hp task block <id> --as <you> --reason "waiting for X"`` - blocked (say who/what you are waiting for). Waiting for the human (the person you work for): add ``--wait human`` (that puts it in his Mailbox).
 - ``hp task done <id> --as <you> --note "result" --evidence "<plain Polish: what I did, how I checked, conclusion>"`` - done (hp warns when a task with commits or links has no evidence).
 - ``hp task note <id> --as <you> "note"``.
 - ``hp task link <id> <url> --as <you> --kind commit|mr|pr [--title "short title"]`` - attach a commit or merge/pull request (GitLab or GitHub) to the task.
@@ -2908,8 +2910,16 @@ hp - Herdr: projects, machines, secrets, chat and agent tasks
     # Multi-line text: hp.cmd goes through cmd.exe, which cuts arguments at the first line break. So a
     # message with lines comes from a file (--file <path>, UTF-8) or from stdin (... | hp say --to x --stdin).
     $mf = O 'file'
-    if ($mf) { if (-not (Test-Path -LiteralPath $mf)) { Fail "No such file: $mf" }; $text = (Read-Text $mf).Trim() }
+    if ($mf) {
+      if (-not (Test-Path -LiteralPath $mf)) { Fail "No such file: $mf" }
+      # UTF-8 (with or without BOM); a file saved in the Windows code page (Set-Content in PowerShell 5.1) is read as that.
+      $bytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $mf).Path)
+      try { $text = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes) } catch { $text = [Text.Encoding]::Default.GetString($bytes) }
+      $text = $text.TrimStart([char]0xFEFF).Trim()
+    }
     elseif (O 'stdin') { $text = ([Console]::In.ReadToEnd()).Trim() }
+    # Polish letters lost on the way (a pipe from Windows PowerShell 5.1 sends "?" for them): refuse, do not post "Potrzebuj? ustale?".
+    if ($text -notmatch '://' -and ([regex]::Matches($text, '\p{L}\?\p{L}')).Count -ge 2) { Fail 'The message lost its Polish letters (they arrived as "?"). Write it to a UTF-8 file ([IO.File]::WriteAllText($p, $text, [Text.UTF8Encoding]::new($false))) and send it with --file <path>.' }
     if (-not $text) { Fail 'Empty message' }
     $to = O 'to' 'all'; $task = O 'task'; $thread = [string](O 'thread' '')
     # --reply <m-id>: answer that message in its thread, to its sender (unless --to says otherwise).
@@ -3460,6 +3470,9 @@ hp - Herdr: projects, machines, secrets, chat and agent tasks
           $x = Find-Task $t $id
           $x.status = $status
           Set-Prop $x 'blocked_reason' $(if ($status -eq 'blocked') { $reason } else { '' })
+          # --wait marcel: blocked on the human (his Mailbox shows it); anything else: on the team (it does not).
+          $wv = ([string](O 'wait' '')).Trim().ToLowerInvariant()
+          Set-Prop $x 'waits' $(if ($status -ne 'blocked') { '' } elseif (@('marcel', 'ty', 'human', 'me') -contains $wv -or $reason -match '(?i)^\s*czeka\w*\s+na\s+marcel') { 'ty' } else { 'team' })
           if ($status -eq 'doing' -and -not $x.started) { Set-Prop $x 'started' (Now-Iso) }
           # Claim lease: In Progress holds one (renewed by progress/note); any other status drops it.
           if ($status -eq 'doing') { Set-Lease $x $me $LeaseMin } elseif ($x.PSObject.Properties['lease']) { $x.lease = $null }
@@ -4238,8 +4251,9 @@ if [ -n "$F" ]; then git -c core.quotepath=off diff --no-color --no-ext-diff $FR
   #   hp mcp exec <server>     runs a stdio server (env filled in) on this process's own stdin/stdout
   #   hp mcp bridge <server>   an HTTP server as stdio (npx mcp-remote, headers filled in), for Codex
   #   hp mcp headers <server>  the HTTP headers as JSON (Claude Code's headersHelper)
+  #   hp mcp test <server>     connects like an agent would (initialize + tools/list); JSON {ok, server, tools, error}
   'mcp' {
-    $sub = P 1 'exec|bridge|headers'; $name = P 2 'server'
+    $sub = P 1 'exec|bridge|headers|test'; $name = P 2 'server'
     $db = Read-Json (Join-Path $HerdrHome 'mcp.json') $null
     $srv = $null
     if ($db) { foreach ($s in @(Arr $db.servers)) { if ([string]$s.name -eq $name) { $srv = $s } } }
@@ -4261,7 +4275,10 @@ if [ -n "$F" ]; then git -c core.quotepath=off diff --no-color --no-ext-diff $FR
     # Starts a program with inherited stdin/stdout/stderr (no redirection: the MCP client talks to it directly).
     $start = {
       param([string]$exe, [string[]]$argList, $envs, [string]$cwd)
-      $c = @(Get-Command $exe -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Sort-Object { if ($_.CommandType -eq 'Application') { 0 } else { 1 } }) | Select-Object -First 1
+      # Prefer what Windows can start: .exe, then .cmd/.bat, then .ps1. Node puts an extensionless "npx" (a sh
+      # script for Git Bash) next to npx.cmd; starting that one fails ("not a valid application").
+      $rank = { param($x) $pth = [string]$x.Source; if (-not $pth) { $pth = [string]$x.Path }; switch -regex ($pth) { '\.(exe|com)$' { 0 } '\.(cmd|bat)$' { 1 } '\.ps1$' { 2 } default { 9 } } }
+      $c = @(Get-Command $exe -All -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Where-Object { (& $rank $_) -lt 9 } | Sort-Object { & $rank $_ }) | Select-Object -First 1
       if (-not $c) { Fail "Command not found: $exe" }
       $path = [string]$c.Source; if (-not $path) { $path = [string]$c.Path }; if (-not $path) { $path = $exe }
       $file = $path; $list = @($argList)
@@ -4278,10 +4295,41 @@ if [ -n "$F" ]; then git -c core.quotepath=off diff --no-color --no-ext-diff $FR
       $psi.UseShellExecute = $false
       if ($cwd) { $psi.WorkingDirectory = $cwd }
       foreach ($k in @($envs.Keys)) { $psi.EnvironmentVariables[[string]$k] = [string]$envs[$k] }
+      if ($script:McpTest) {
+        $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        return [System.Diagnostics.Process]::Start($psi)
+      }
       $proc = [System.Diagnostics.Process]::Start($psi)
       $proc.WaitForExit()
       exit $proc.ExitCode
     }
+    # Test: one JSON-RPC request over a started process's stdin/stdout; skips log lines and other messages.
+    $rpc = {
+      param($proc, [int]$id, [string]$method, $params, [int]$ms)
+      $req = [ordered]@{ jsonrpc = '2.0'; id = $id; method = $method; params = $params }
+      $proc.StandardInput.WriteLine((ConvertTo-Json -InputObject $req -Compress -Depth 10)); $proc.StandardInput.Flush()
+      $until = (Get-Date).AddMilliseconds($ms)
+      while ((Get-Date) -lt $until) {
+        if (-not $script:McpRead) { $script:McpRead = $proc.StandardOutput.ReadLineAsync() }
+        $left = [int][Math]::Max(1, ($until - (Get-Date)).TotalMilliseconds)
+        if (-not $script:McpRead.Wait($left)) { break }
+        $line = $script:McpRead.Result; $script:McpRead = $null
+        if ($null -eq $line) { break }
+        if ($line -notmatch '^\s*\{') { continue }
+        try { $m = $line | ConvertFrom-Json } catch { continue }
+        if ($m.id -eq $id) { return $m }
+      }
+      return $null
+    }
+    $report = {
+      param([bool]$ok, $srvInfo, $tools, [string]$err)
+      $names = @(@(Arr $tools) | ForEach-Object { [string]$_.name })
+      $list = @(@(Arr $tools) | ForEach-Object { $d = ([string]$_.description -replace '\s+', ' ').Trim(); if ($d.Length -gt 400) { $d = $d.Substring(0, 399) + '...' }; [ordered]@{ name = [string]$_.name; desc = $d } })
+      $o = [ordered]@{ ok = $ok; server = $(if ($srvInfo) { ([string]$srvInfo.name + ' ' + [string]$srvInfo.version).Trim() } else { '' }); tools = $names.Count; toolNames = @($names | Select-Object -First 12); toolList = $list; error = $err }
+      Write-Output (ConvertTo-Json -InputObject $o -Compress)
+    }
+    $init = [ordered]@{ protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = [ordered]@{ name = 'herdr-hyper-view'; version = '1.0' } }
     switch ($sub) {
       'headers' {
         $h = & $pairs $srv.headers
@@ -4295,7 +4343,10 @@ if [ -n "$F" ]; then git -c core.quotepath=off diff --no-color --no-ext-diff $FR
       'bridge' {
         if (-not [string]$srv.url) { Fail "MCP server '$name' has no URL." }
         # mcp-remote expands ${VAR} in --header itself, so values with spaces ("Bearer x") stay out of the command line.
-        $argList = @('-y', 'mcp-remote', (& $fill ([string]$srv.url)))
+        $u = & $fill ([string]$srv.url)
+        $argList = @('-y', 'mcp-remote', $u)
+        # mcp-remote refuses plain http:// outside localhost unless told (internal servers like http://10.x:3018/mcp).
+        if ($u -match '^http://') { $argList += '--allow-http' }
         $envs = [ordered]@{}; $i = 0
         foreach ($e in @(Arr $srv.headers)) {
           if (-not ($e -and [string]$e.name)) { continue }
@@ -4304,7 +4355,53 @@ if [ -n "$F" ]; then git -c core.quotepath=off diff --no-color --no-ext-diff $FR
         }
         & $start 'npx' $argList $envs ''
       }
-      default { Fail 'hp mcp exec|bridge|headers <server>' }
+      'test' {
+        try {
+          if ([string]$srv.transport -eq 'http') {
+            $url = & $fill ([string]$srv.url)
+            if (-not $url) { & $report $false $null $null 'No URL.'; break }
+            $h = & $pairs $srv.headers
+            $hdr = @{ 'Accept' = 'application/json, text/event-stream' }
+            foreach ($k in @($h.Keys)) { $hdr[[string]$k] = [string]$h[$k] }
+            $post = {
+              param($body)
+              $r = Invoke-WebRequest -Uri $url -Method Post -Headers $hdr -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $body -Compress -Depth 10))) -UseBasicParsing -TimeoutSec 30
+              $sid = [string]$r.Headers['Mcp-Session-Id']; if ($sid) { $hdr['Mcp-Session-Id'] = $sid }
+              $text = [string]$r.Content
+              # Streamable HTTP may answer as server-sent events: the JSON is on a "data:" line.
+              $json = @($text -split "`n" | Where-Object { $_ -match '^data:\s*\{' } | ForEach-Object { $_ -replace '^data:\s*', '' }) | Select-Object -Last 1
+              if (-not $json) { $json = $text }
+              return ($json | ConvertFrom-Json)
+            }
+            $a = & $post ([ordered]@{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = $init })
+            if ($a.error) { & $report $false $null $null ([string]$a.error.message); break }
+            try { Invoke-WebRequest -Uri $url -Method Post -Headers $hdr -ContentType 'application/json' -Body '{"jsonrpc":"2.0","method":"notifications/initialized"}' -UseBasicParsing -TimeoutSec 15 | Out-Null } catch {}
+            $tl = $null; try { $tl = & $post ([ordered]@{ jsonrpc = '2.0'; id = 2; method = 'tools/list'; params = @{} }) } catch {}
+            & $report $true $a.result.serverInfo $tl.result.tools ''
+          } else {
+            $script:McpTest = $true
+            $argList = @(@(Arr $srv.args) | ForEach-Object { & $fill ([string]$_) })
+            $proc = & $start ([string]$srv.command) $argList (& $pairs $srv.env) ([string]$srv.cwd)
+            $errTask = $proc.StandardError.ReadToEndAsync()
+            try {
+              # The first start may download the package (npx -y): up to 60 s.
+              $a = & $rpc $proc 1 'initialize' $init 60000
+              if (-not $a) {
+                $why = ''; if ($proc.HasExited) { $why = 'It stopped (exit code ' + $proc.ExitCode + '). ' }
+                $e = ''; if ($errTask.Wait(1500)) { $e = [string]$errTask.Result }
+                $e = (($e -split "`n" | Where-Object { $_.Trim() }) | Select-Object -Last 3) -join ' '
+                & $report $false $null $null ($why + $(if ($e) { $e } else { 'No answer to initialize within 60 s.' }))
+              } elseif ($a.error) { & $report $false $null $null ([string]$a.error.message) }
+              else {
+                $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}'); $proc.StandardInput.Flush()
+                $tl = & $rpc $proc 2 'tools/list' @{} 20000
+                & $report $true $a.result.serverInfo $tl.result.tools ''
+              }
+            } finally { try { if (-not $proc.HasExited) { & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null } } catch {} }
+          }
+        } catch { & $report $false $null $null ([string]$_.Exception.Message) }
+      }
+      default { Fail 'hp mcp exec|bridge|headers|test <server>' }
     }
   }
 

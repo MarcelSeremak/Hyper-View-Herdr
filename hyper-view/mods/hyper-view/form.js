@@ -17,7 +17,7 @@ import {
 // Dialogs with long lists (machines, tokens, agents): fixed height, the fields scroll, buttons stay put.
 const TALL = new Set(["agent-new", "loose-agent", "skill-edit", "mcp-edit"]);
 export function openForm(kind, extra = {}) {
-  if (!extra?.tour) rememberFocus(`form:${kind}`); // focus goes back to this zone when the dialog closes (lib.js focus manager)
+  rememberFocus(`form:${kind}`); // focus goes back to this zone when the dialog closes (lib.js focus manager)
   openOverlay({ mod: MOD, props: { role: "form", kind, ...extra }, kind: "dialog", ...(TALL.has(kind) ? { height: 0.88 } : {}), width: kind === "agent-new" || kind === "loose-agent" || kind === "vm-import" ? 680 : kind === "message" || kind === "snippet" || kind === "secret-add" || kind === "skill-edit" || kind === "mcp-edit" ? 640 : kind === "task-add" ? 520 : 480, modal: true });
 }
 
@@ -249,7 +249,7 @@ export class Form {
     cx.spawn(async (cx) => { this.customTeams = (await loadCustomTeams()).teams; cx.notify(); });
     this.build(cx);
     // Machine passwords: the saved one is shown (plain text) so you can see / change it.
-    if ((this.p.kind === "vm-password" || this.p.kind === "vm-sudo") && this.p.machine && !this.p.tour) {
+    if ((this.p.kind === "vm-password" || this.p.kind === "vm-sudo") && this.p.machine) {
       cx.spawn(async (cx) => {
         const r = await hp(["vm", "getpass", this.p.machine], { which: this.p.kind === "vm-sudo" ? "sudo" : "ssh" });
         const st = this.inputs.password;
@@ -411,8 +411,6 @@ export class Form {
 
   submit(cx) {
     if (this.busy) return;
-    // Opened by the tutorial: show how it works, never save anything.
-    if (this.p.tour) { toast("Tutorial", "Nothing was saved — this was just a demo.", "info"); this.close(); return; }
     if (this.p.kind === "vm-import") return this.runImport(cx);
     const miss = this.missing();
     if (miss) { this.error = `Required: ${miss.label}`; cx.notify(); return; }
@@ -591,7 +589,7 @@ export class Form {
         if (after.some((x) => !/^\d+$/.test(x))) return "Waits for: task numbers, e.g. 2, 5";
         // hp has no --source on add: the agent starts the task in that source (hp task start <id> --source <name>).
         const desc = [s("desc"), v.source ? `Source: ${v.source} (hp task start <id> --source ${v.source})` : ""].filter(Boolean).join("\n\n");
-        if (this.p.tour || demo()) { toast("Demo mode", "Nothing was created.", "info"); return null; }
+        if (demo()) { toast("Demo mode", "Nothing was created.", "info"); return null; }
         // Epic: owned by the lead (it gets "break it into tasks"), no column (its status follows its tasks).
         const epic = v.kind === "epic" && this.p.epic == null;
         const who = v.for === "@lead" ? leadOf(this.data.project) ?? "team" : v.for;

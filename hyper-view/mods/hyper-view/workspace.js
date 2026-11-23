@@ -20,7 +20,7 @@ import { secretsView, settingsView } from "./secrets.js";
 import { clipboardView, loadClips, changeClips } from "./clipboard.js";
 import { skillsView, mcpView, kitPanels, listPanel, searchField, loadSkills, loadMcp, changeSkills, changeMcp } from "./kit.js";
 import { typeOf, typeLabel } from "./secretkinds.js";
-import { mailboxView } from "./mailbox.js";
+import { mailboxView, ASK as MAIL_ASK } from "./mailbox.js";
 import { dashboardView, dashKey } from "./dashboard.js";
 import { mapView, mapKey } from "./mapview.js";
 import { startActivity, actCurrent, actItems, actUsage, actHasData, actTokens } from "./activity.js";
@@ -30,7 +30,7 @@ import { openTaskPanel, taskPanelOpen, closeTaskPanel, isEpic, epicKids, epicPla
 import { openActions } from "./actions.js";
 import { agentsTab, agentsSummary, agentFacts } from "./agentsview.js";
 import { openAgentPage, tabsOf } from "./toolbar.js";
-import { activitySection, activityView, pinnedStale, projectRuns, runList, openProjectActivity } from "./projectactivity.js";
+import { activitySection, activityView, pinnedStale, projectRuns, runList, openProjectActivity, computeQueuedRuns } from "./projectactivity.js";
 import { startDailyReport } from "./dailyreport.js";
 import { VirtualListScrollHandle, Popover } from "gpui-base";
 
@@ -65,6 +65,8 @@ export class Workspace {
   init(cx) {
     this.taskSearchState(); // input state must be created outside render
     this.secSearchState();
+    // Activity runs are built outside render (projectactivity.js): one queued rebuild per tick, then redraw.
+    repeat(cx, 400, (cx) => { if (computeQueuedRuns()) cx.notify(); }, claimJob("view.runs"));
     for (const k of ["acc", "cred", "skills", "servers", "pcred"]) this.agQ(k); // panel searches (agent page, project Credentials)
     this.project = null;
     this.events = [];
@@ -93,7 +95,7 @@ export class Workspace {
     // top row moved into another day); the daily Mailbox report (dailyreport.js, once per day).
     this.agentPickState();
     try { this.paScroll = VirtualListScrollHandle.new(); } catch {}
-    repeat(cx, 250, (cx) => { const v = view(); if (v.kind === "project" && v.tab === "activity" && pinnedStale()) cx.notify(); }, claimJob("view.pinned"));
+    repeat(cx, 1000, (cx) => { const v = view(); if (v.kind === "project" && v.tab === "activity" && pinnedStale()) cx.notify(); }, claimJob("view.pinned"));
     startDailyReport(cx);
   }
   // Rows of a keyboard list that draws its own highlight (virtual lists allow no handlers per row).
@@ -393,9 +395,23 @@ export class Workspace {
     const open = (x) => () => openTaskPanel(p.slug, x.id);
     const KIND = { needs: ["Needs you", WARN], blocked: ["Blocked", BAD], started: ["Started", INFO], done: ["Done", OK] };
     const items = [];
-    for (const a of p.agents) { const live = liveAgent(p, a.name); if (live?.status === "blocked") items.push({ kind: "needs", text: `${a.name} is waiting for you`, time: "now", go: () => { run("agent.focus", { terminal: live.address }); showCenter("mp-terms"); } }); }
-    for (const e of this.events.filter((e) => e.to === "ty" && recent(e.ts)).slice(-5).reverse()) items.push({ kind: "needs", text: `${e.from}: ${e.text}`, time: fmtTime(e.ts), go: e.task ? () => openTaskPanel(p.slug, Number(e.task) || e.task) : null });
-    for (const n of p.machines) { const st = stats[n]; if (st && !st.ok) items.push({ kind: "needs", text: `${n} is offline`, time: "", go: () => openVm(n) }); }
+    // "Needs you" = the same as the Mailbox: approval requests and questions (a "?" or "Odpowiedz") to you that
+    // you have not answered yet. Plain reports to you are not listed (they are in the chat). Click: Mailbox.
+    const ev = this.events ?? [];
+    ev.forEach((e, i) => {
+      if (e.to !== "ty" || e.from === "ty" || !recent(e.ts)) return;
+      if (e.type === "approval") {
+        const n = /^Approval #(\d+)/.exec(e.text ?? "")?.[1];
+        if (n && ev.slice(i + 1).some((x) => x.from === "ty" && new RegExp(`^(Approved|Rejected) #${n}\\b`).test(x.text ?? ""))) return;
+      } else if (e.type === "message") {
+        if (!MAIL_ASK.test(e.text ?? "") || ev.slice(i + 1).some((x) => x.from === "ty" && x.to === e.from && (e.task == null || String(x.task ?? "") === String(e.task)))) return;
+      } else return;
+      items.push({ kind: "needs", text: `${e.from}: ${e.text}`, time: fmtTime(e.ts), go: () => { openMailbox(); showCenter("mp-view"); } });
+    });
+    items.reverse();
+    // An agent waiting at its own prompt, or a machine offline: not a question to you, so not "needs you".
+    for (const a of p.agents) { const live = liveAgent(p, a.name); if (live?.status === "blocked") items.push({ kind: "blocked", text: `${a.name} waits at its terminal prompt`, time: "now", go: () => { run("agent.focus", { terminal: live.address }); showCenter("mp-terms"); } }); }
+    for (const n of p.machines) { const st = stats[n]; if (st && !st.ok) items.push({ kind: "blocked", text: `${n} is offline`, time: "", go: () => openVm(n) }); }
     const byTs = (k) => (a, b) => String(b[k] ?? "").localeCompare(String(a[k] ?? ""));
     for (const x of p.tasks.filter((x) => x.status === "blocked")) items.push({ kind: "blocked", text: `${x.title}${x.blocked_reason ? " — " + x.blocked_reason : ""}`, time: "", go: open(x) });
     for (const x of p.tasks.filter((x) => (x.status === "doing" || x.status === "review") && recent(x.started)).sort(byTs("started"))) items.push({ kind: "started", text: x.title, time: fmtTime(x.started), go: open(x) });
@@ -411,7 +427,8 @@ export class Workspace {
         .children(items.slice(0, MAX).map((it, i) => h_flex().id(`mp-today-${i}`).h(32).px(8).gap(8).items_center().rounded(T.r.panel)
           .when(Boolean(it.go), (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => { it.go(); cx.notify(); }))
           .child(div().flex_none().size(T.dot).rounded_full().bg(KIND[it.kind][1]))
-          .child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).child(it.text))
+          // One line: messages with line breaks used to spill over the next rows.
+          .child(div().flex_1().min_w(0).truncate().text_size(T.text.sm).child(String(it.text ?? "").replace(/\s+/g, " ")))
           .child(div().flex_none().text_size(T.text.xs).text_color(t.dim).child(it.time))))
         .when(items.length > MAX, (el) => el.child(h_flex().id("mp-today-more").h(28).px(8).items_center().rounded(T.r.panel).cursor_pointer().hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => { this.todayAll = !this.todayAll; cx.notify(); })

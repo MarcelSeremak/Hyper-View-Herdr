@@ -4,7 +4,7 @@
 // (only when it changes), so avatars get an amber ring (lib.agentAvatar), project rows a count badge,
 // and Ctrl+J / the palette "Jump to next waiting" cycles through them (cmux-style "jump to latest").
 import { shared, setShared, run } from "herdr";
-import { demo, listProjects, liveAgent, selectProject, showCenter, openMailbox, toast, claimJob, repeat } from "./lib.js";
+import { appActive, demo, listProjects, liveAgent, selectProject, showCenter, openMailbox, toast, claimJob, repeat } from "./lib.js";
 import { loadMailbox } from "./mailbox.js";
 
 let started = false;
@@ -21,7 +21,8 @@ export function startAttention(cx) {
     cx.spawn(async () => {
     try {
       // Live statuses are cheap (every 3 s); the mailbox reads every project's files (every 30 s).
-      if (tick++ % 10 === 0) {
+      // (every 90 s while the window is in the background)
+      if (tick++ % (appActive() ? 10 : 30) === 0) {
         projects = await listProjects();
         const { items, done } = await loadMailbox();
         mail = items.filter((it) => !it.auto && !done.has(it.id) && (it.kind === "ask" || it.kind === "approval"));

@@ -54,6 +54,10 @@ function refresh(cx) {
       publishCount(S.mail.length);
     } catch {}
     S.at = Date.now(); S.loading = 0;
+    // The 30-day series and the board walk every event and task of every project: done here, after the
+    // load, not inside a frame (a render that has to do it runs out of time).
+    try { seriesNow(); } catch {}
+    try { boardData(); } catch {}
     cx.notify();
   });
 }
@@ -129,12 +133,12 @@ function rows() {
     const live = liveAgent(p, it.from);
     if (it.kind === "task") {
       needs.push({ key: it.id, rank: RANK[it.status] ?? 5, dot: it.status === "blocked" ? BAD : INFO, name: it.from, p, live, ts: it.ts,
-        text: `${it.status === "blocked" ? "Blocked" : "Review"} · ${it.text}`, act: ["Open", openTask(it.slug, it.taskId)], taskId: it.taskId });
+        text: `${it.status === "blocked" ? "Blocked" : "Review"} · ${String(it.text ?? "").replace(/\s*\r?\n\s*/g, "  ").trim()}`, act: ["Open", openTask(it.slug, it.taskId)], taskId: it.taskId });
       continue;
     }
     asked.add(`${it.slug}\t${it.from}`);
     const canApprove = it.kind === "ask" || (it.kind === "approval" && Boolean(it.approvalId));
-    needs.push({ key: it.id, rank: RANK[it.kind] ?? 5, dot: WARN, name: it.from, p, live, ts: it.ts, text: it.text, item: it,
+    needs.push({ key: it.id, rank: RANK[it.kind] ?? 5, dot: WARN, name: it.from, p, live, ts: it.ts, text: String(it.text ?? "").replace(/\s*\r?\n\s*/g, "  ").trim(), item: it,
       act: canApprove ? ["Approve", (cx) => approve(cx, it)] : ["Answer", (cx) => startReply(cx, it)],
       act2: canApprove ? ["Answer", (cx) => startReply(cx, it)] : null,
       approve: canApprove ? (cx) => approve(cx, it) : null,
@@ -311,7 +315,8 @@ function sample(G) {
 }
 // 30-day series, recomputed once per data refresh (not per frame).
 let SER = { at: -1 };
-function series() {
+function series() { return SER.at === -1 ? seriesNow() : SER; }
+function seriesNow() {
   if (SER.at === S.at && SER.demo === demo()) return SER;
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const days = Array.from({ length: N }, (_, i) => new Date(today.getTime() - (N - 1 - i) * DAY));
@@ -423,7 +428,8 @@ const PRI = { urgent: 0, high: 1, normal: 2, low: 3 };
 // Cards drawn per column (the rest: "+N more" opens the project's Tasks). With 40 per column the whole
 // dashboard ran out of render time ("This view could not be re-rendered: interrupted").
 const BOARD_MAX = 5;
-function boardPanel(t, cw) {
+function boardData() {
+  if (S.boardAt === S.at && S.board) return S.board;
   const seen = new Set(), by = Object.fromEntries(BOARD.map(([s]) => [s, []]));
   for (const p of S.projects) {
     if (p.loose) continue;
@@ -435,11 +441,25 @@ function boardPanel(t, cw) {
       by[x.status].push({ x, p });
     }
   }
-  const card = ({ x, p }) => {
+  for (const [s] of BOARD) by[s].sort(s === "done" ? (a, b) => ms(b.x.completed) - ms(a.x.completed)
+    : (a, b) => (PRI[a.x.priority] ?? 2) - (PRI[b.x.priority] ?? 2) || ms(b.x.started ?? b.x.created) - ms(a.x.started ?? a.x.created));
+  // Everything the cards need that does not change between data refreshes: epic progress, "+N more" target.
+  for (const [s] of BOARD) {
+    for (const it of by[s].slice(0, BOARD_MAX)) if (it.x.kind === "epic") { const kids = epicKids(it.p, it.x); it.kidsN = kids.length; it.kidsDone = kids.filter((y) => y.status === "done").length; }
+    const cnt = {};
+    for (const { p } of by[s].slice(BOARD_MAX)) cnt[p.slug] = (cnt[p.slug] ?? 0) + 1;
+    by[s].top = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0] ?? null;
+  }
+  S.boardAt = S.at; S.board = by;
+  return by;
+}
+function boardPanel(t, cw) {
+  const by = boardData(); // grouped and sorted once per data refresh
+  const card = ({ x, p, kidsN = 0, kidsDone = 0 }) => {
     const live = x.agent ? liveAgent(p, x.agent) : null;
     if (x.kind === "epic") {
       // An epic is a goal broken into tasks: green bar, EPIC, its tasks done / total (not a task card).
-      const kids = epicKids(p, x), done = kids.filter((y) => y.status === "done").length;
+      const kids = { length: kidsN }, done = kidsDone;
       return h_flex().id(`mp-dk-b-${p.slug}-${x.id}`).w_full().min_w(0).rounded(T.r.ctrl).bg(t.background).border_1().border_color(`${OK}55`).overflow_hidden()
         .cursor_pointer().hover((st) => st.border_color(OK)).on_click((_e, cx) => { openTask(p.slug, x.id)(); cx.notify(); })
         .tooltip(`Epic #${x.id} ${x.title} · ${kids.length ? `${done}/${kids.length} tasks done` : "not planned yet"} · ${p.name}`)
@@ -469,10 +489,9 @@ function boardPanel(t, cw) {
         .child(agentAvatar(t, x.agent ?? "?", live, 14)));
   };
   const cols = BOARD.map(([s, lab]) => {
-    const items = s === "done" ? by[s].sort((a, b) => ms(b.x.completed) - ms(a.x.completed))
-      : by[s].sort((a, b) => (PRI[a.x.priority] ?? 2) - (PRI[b.x.priority] ?? 2) || ms(b.x.started ?? b.x.created) - ms(a.x.started ?? a.x.created));
+    const items = by[s];
     const rest = items.slice(BOARD_MAX);
-    const top = Object.entries(rest.reduce((m, { p }) => ((m[p.slug] = (m[p.slug] ?? 0) + 1), m), {})).sort((a, b) => b[1] - a[1])[0];
+    const top = items.top;
     return v_flex().flex_1().min_w(0).gap(T.sp.sm)
       .child(h_flex().h(T.h.rowDense - 4).gap(T.sp.sm).items_center()
         .child(div().flex_none().size(T.dot).rounded_full().bg(TASK_COLOR[s]))
@@ -480,7 +499,7 @@ function boardPanel(t, cw) {
         .child(txt(T.text.xs, t.dim).child(String(items.length))))
       .when(!items.length, (e) => e.child(txt(T.text.xs, t.dim).h(T.h.rowDense).child("—")))
       .children(items.slice(0, BOARD_MAX).map(card))
-      .when(rest.length > 0, (e) => e.child(link(t, `mp-dk-bm-${s}`, `+${rest.length} more`, () => { selectProject(top[0], "tasks"); showCenter("mp-view"); })));
+      .when(rest.length > 0, (e) => e.child(link(t, `mp-dk-bm-${s}`, `+${rest.length} more`, () => { if (top) selectProject(top[0], "tasks"); showCenter("mp-view"); })));
   });
   const total = BOARD.reduce((n, [s]) => n + (s === "done" ? 0 : by[s].length), 0);
   // Fixed height (the row's), the columns scroll inside; the wheel over it scrolls only the board.
@@ -536,15 +555,20 @@ function limits(t) {
 }
 
 // ------------------------------------------------------------ view
+const PROF = (k, f) => { const t0 = Date.now(); const v = f(); const ms = Date.now() - t0; const P = (globalThis.__hvRenderProf2 ??= { k: {} }).k; const r = (P[`dash.${k}`] ??= { n: 0, total: 0, max: 0, slow: 0 }); r.n++; r.total += ms; if (ms > r.max) r.max = ms; if (ms > 50) r.slow++; return v; };
 export function dashboardView(ws, t, cx) {
   if (Date.now() - S.at > 6000 && (!S.loading || Date.now() - S.loading > 60000)) refresh(cx);
-  const G = rows();
+  // The lists and the board are computed once per data refresh (every few seconds), not on every frame:
+  // Herdr redraws on every agent / terminal change, and recomputing on each ran renders out of time.
+  const gk = `${S.at}|${S.gone?.size ?? 0}|${S.filter ?? ""}|${Math.floor(Date.now() / 3000)}`;
+  if (S.Gk !== gk) { S.Gk = gk; S.G = PROF("rows", () => rows()); }
+  const G = S.G;
   const ready = G.ready.length;
   const sub = `${G.needs.length ? `${G.needs.length} need${G.needs.length === 1 ? "s" : ""} you` : "Nothing needs you"} · ${G.working.length} working${ready ? ` · ${ready} ready` : ""}`;
   if (S.at && shared("mp.dashSub") !== sub) cx.spawn(async () => setShared("mp.dashSub", sub));
   if (!S.at) return v_flex().w_full().pt(T.sp.lg).child(skeleton(t, 6));
-  sample(G);
-  const X = series();
+  PROF("sample", () => sample(G));
+  const X = PROF("series", () => series());
   const cw = ws.contentW();
   const wide = cw >= 1000;
   // Needs-you column: ~42% of the page (480-760 px) beside the charts; full width when narrow.
@@ -552,23 +576,23 @@ export function dashboardView(ws, t, cx) {
   S.whoW = leftW >= 640 ? 200 : 150;
   const needs = panel(t, "mp-dk-main").gap(T.sp.sm)
     // Keys come from the center view's focus handle (workspace.js onKey → dashKey).
-    .child(tabs(t, G))
-    .child(wide ? scrollY("mp-dk-list", v_flex().w_full().pr(T.sp.md).child(list(t, G))).on_scroll_wheel((_e, cx) => cx.stop_propagation()) : list(t, G));
+    .child(PROF("tabs", () => tabs(t, G)))
+    .child(wide ? scrollY("mp-dk-list", v_flex().w_full().pr(T.sp.md).child(PROF("list", () => list(t, G)))).on_scroll_wheel((_e, cx) => cx.stop_propagation()) : list(t, G));
   const chartH = cw >= 1800 ? 220 : 170;
   const small = cw >= 1800 ? 140 : 110;
   const charts = v_flex().flex_1().min_w(0).gap(T.sp.lg)
-    .child(activityPanel(t, X, chartH))
-    .child((cw >= 760 ? h_flex() : v_flex()).w_full().gap(T.sp.lg).items_start().child(tokensPanel(t, X, small)).child(throughputPanel(t, X, small)));
-  const side = panel(t, "mp-dk-side").gap(T.sp.lg).child(machinesPanel(t)).child(div().flex_none().h(1).bg(t.border)).child(div().flex_none().child(limits(t)));
+    .child(PROF("activity", () => activityPanel(t, X, chartH)))
+    .child((cw >= 760 ? h_flex() : v_flex()).w_full().gap(T.sp.lg).items_start().child(PROF("tokens", () => tokensPanel(t, X, small))).child(PROF("throughput", () => throughputPanel(t, X, small))));
+  const side = panel(t, "mp-dk-side").gap(T.sp.lg).child(PROF("machines", () => machinesPanel(t))).child(div().flex_none().h(1).bg(t.border)).child(div().flex_none().child(PROF("limits", () => limits(t))));
   const BOARD_H = cw >= 1800 ? 560 : 460;
   const skip = Number(shared("mp.devDashSkip")) || 0; // design previews only: hide the first rows to see the rest
   return v_flex().id("mp-dk").w_full().gap(T.sp.lg)
-    .when(skip < 1, (e) => e.child(tiles(t, G, X, cw)))
+    .when(skip < 1, (e) => e.child(PROF("tiles", () => tiles(t, G, X, cw))))
     // Wide: the Needs-you list ends where the charts end (it is laid over its column, so only the charts set
     // the height) and scrolls inside; the board row has a fixed height, the machines panel fills it.
     .when(skip < 2, (e) => e.child(wide ? h_flex().w_full().gap(T.sp.lg).items_stretch()
       .child(div().relative().w(leftW).flex_none().child(needs.absolute().top(0).bottom(0).left(0).right(0)))
       .child(charts) : v_flex().w_full().gap(T.sp.lg).child(needs).child(charts)))
-    .child(wide ? h_flex().w_full().h(BOARD_H).gap(T.sp.lg).items_stretch().child(boardPanel(t, cw - 340)).child(side.w(320).flex_none().h_full())
+    .child(wide ? h_flex().w_full().h(BOARD_H).gap(T.sp.lg).items_stretch().child(PROF("board", () => boardPanel(t, cw - 340))).child(side.w(320).flex_none().h_full())
       : v_flex().w_full().gap(T.sp.lg).child(div().h(BOARD_H).child(boardPanel(t, cw))).child(side));
 }

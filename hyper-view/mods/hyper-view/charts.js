@@ -71,10 +71,23 @@ function trace(b, pts, curved) {
 }
 // Layers (absolute, filling a relative parent) that draw a line, optionally over a faint flat area.
 // Returns [] when the host has no paint_path (callers then fall back to an SVG file).
+const MAX_PTS = 16;
 export function pathLayers(values, color, { max, min = 0, fill = true, stroke = 1.5, curved = true, top = 6 } = {}) {
   const W = PAINT();
   if (!W) return [];
-  const vals = values.map((v) => (Number.isFinite(v) ? v : 0));
+  // Every path coordinate is parsed by the host (a "12.5%" string each), and a curve takes 6 per point:
+  // a dozen chart lines of 30-48 curved points per frame ran renders out of time ("interrupted" in
+  // trace / pc / coordinate). At most 16 points (averaged buckets), curves only for short series.
+  let vals = values.map((v) => (Number.isFinite(v) ? v : 0));
+  if (vals.length > MAX_PTS) {
+    const out = [];
+    for (let i = 0; i < MAX_PTS; i++) {
+      const a = Math.floor((i * vals.length) / MAX_PTS), b = Math.max(a + 1, Math.floor(((i + 1) * vals.length) / MAX_PTS));
+      const part = vals.slice(a, b); out.push(part.reduce((s, x) => s + x, 0) / part.length);
+    }
+    vals = out;
+  }
+  curved = curved && vals.length <= 12;
   const hi = max ?? Math.max(1, ...vals);
   const pts = pctPoints(vals, hi, min, top);
   const out = [];

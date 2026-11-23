@@ -4,7 +4,7 @@ import { cardHead as cardHeader } from "./ide.js";
 import { T } from "./tokens.js";
 import { div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { iconEl, card, empty, clear, fmtTok, fmtTime, colorFor, BAD, OK, WARN, INFO } from "./lib.js";
+import { iconEl, card, empty, clear, fmtTok, fmtTime, colorFor, agentWorking, BAD, OK, WARN, INFO } from "./lib.js";
 import { actItems, actTokens, actSession, dayOf, activityError } from "./activity.js";
 
 // kind -> [icon, color, name]
@@ -35,7 +35,7 @@ export function dayLabel(day) {
   const [y, m, d] = day.split("-").map(Number);
   return `${MONTHS[m - 1]} ${d}${y !== new Date().getFullYear() ? `, ${y}` : ""}`;
 }
-const live = (x) => x.x === "run" && Date.now() - x.t < 15 * 60 * 1000;
+const live = (x) => x.x === "run" && Date.now() - x.t < 15 * 60 * 1000 && agentWorking(x.a);
 
 // hp events of this agent (messages, tasks, remote commands) as timeline items; name null = every agent
 // of the project (item.a = the agent it belongs to, for the project-wide Activity view).
@@ -99,7 +99,6 @@ export function buildRuns(items, p, liveOf) {
       if (x.k === "error" || x.x === "fail") errors++;
       if (x.k === "test" && x.x !== "run") test = x;
       if (x.k === "commit" && x.x !== "fail") commits++;
-      if (x.x === "run" && Date.now() - x.t < 15 * 60 * 1000) running = true;
       if (x.k === "message" && x.a === r.a) lastMsg = x.l;
       if (!prompt && x.k === "prompt") prompt = x.l;
       if (!ask && x.k === "message" && x.a === "ty") ask = x.txt ?? x.l;
@@ -109,7 +108,7 @@ export function buildRuns(items, p, liveOf) {
     r.title = tk ? `#${tk.id} ${tk.title}` : r.task ? `#${r.task}` : prompt ?? ask ?? (((m) => m?.txt ?? m?.l)(r.steps.find((x) => x.k === "message"))) ?? r.steps[0]?.l ?? "Run";
     r.taskObj = tk ?? null;
     const live = lastOf.get(r.a) === r ? liveOf?.(r.a) : null;
-    if (live?.status === "working" && Date.now() - r.last < 10 * 60 * 1000) running = true;
+    if (live?.status === "working" && Date.now() - r.last < 15 * 60 * 1000) running = true;
     const lastStep = r.steps[r.steps.length - 1];
     Object.assign(r, { edits, cmds, errors, commits, test, files: [...files].sort((x, y) => y[1] - x[1]).slice(0, 5), live: running,
       lastMsg: ((m) => (m && !String(m).endsWith(r.title) ? m : ""))(lastMsg ?? lastStep?.l) });

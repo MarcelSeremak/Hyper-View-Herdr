@@ -127,7 +127,6 @@ export class SecretWizard {
 
   submit(cx) {
     if (this.step !== 3 || this.busy) return;
-    if (this.p.tour) { toast("Tutorial", "Nothing was saved — this was just a demo.", "info"); this.close(); return; }
     const v = (k) => String(this.values[k] ?? "").trim();
     const edit = this.p.edit;
     const name = slug(v("name")) || (edit ? edit.name : "");
